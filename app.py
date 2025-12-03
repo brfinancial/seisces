@@ -5,6 +5,7 @@ from datetime import datetime
 from io import BytesIO
 
 import matplotlib.pyplot as plt
+import pdfplumber
 import streamlit as st
 from docx import Document
 
@@ -158,7 +159,8 @@ def analyze_text_block(text: str, category: str) -> str:
 
 # =============== PARECER EM PROSA ===============
 
-def generate_report(company_name, all_answers, category_scores, overall_percent, sazonalidade_resumo=None):
+def generate_report(company_name, all_answers, category_scores, overall_percent,
+                    sazonalidade_resumo=None, serasa_resumo=None):
     wrapper = textwrap.TextWrapper(width=100)
     lines = []
 
@@ -172,6 +174,11 @@ def generate_report(company_name, all_answers, category_scores, overall_percent,
     if sazonalidade_resumo:
         lines.append("Resumo de sazonalidade de crédito:")
         lines.append(wrapper.fill(sazonalidade_resumo))
+        lines.append("")
+
+    if serasa_resumo:
+        lines.append("Resumo da análise do relatório Serasa:")
+        lines.append(wrapper.fill(serasa_resumo))
         lines.append("")
 
     if overall_percent >= 80:
@@ -315,7 +322,7 @@ def sazonalidade_section():
 
     if possui_sazonalidade == "Não":
         st.info("Não há sazonalidade específica nesse setor segundo as informações fornecidas.")
-        return None, None  # sem resumo, sem figura
+        return "Não há sazonalidade específica nesse setor segundo as informações fornecidas.", None
 
     setor = st.text_input(
         "Informe o setor de atuação da empresa (ex.: fantasias, varejo, agro, serviços etc.):",
@@ -383,28 +390,169 @@ def sazonalidade_section():
 
     st.pyplot(fig)
 
-    resumo = ""
-    if possui_sazonalidade == "Não":
-        resumo = "Não há sazonalidade específica nesse setor segundo as informações fornecidas."
+    if shift == -2:
+        janela = "alguns meses ANTES do pico de vendas"
+    elif shift == 0:
+        janela = "no próprio pico de vendas"
     else:
-        janela = ""
-        if shift == -2:
-            janela = "alguns meses ANTES do pico de vendas"
-        elif shift == 0:
-            janela = "no próprio pico de vendas"
-        else:
-            janela = "logo DEPOIS do pico de vendas"
+        janela = "logo DEPOIS do pico de vendas"
 
-        nome_mes_pico = nomes_meses[pico_vendas - 1]
-        nome_mes_centro = nomes_meses[centro_credito - 1]
-        resumo = (
-            f"Para o setor informado ({setor if setor else 'não especificado'}), a análise considera que o "
-            f"pico de demanda ocorre em {nome_mes_pico}. A janela ótima de crédito foi ajustada para {janela}, "
-            f"com maior atratividade concentrada em {nome_mes_centro} e meses próximos."
-        )
+    nome_mes_pico = nomes_meses[pico_vendas - 1]
+    nome_mes_centro = nomes_meses[centro_credito - 1]
+    resumo = (
+        f"Para o setor informado ({setor if setor else 'não especificado'}), a análise considera que o "
+        f"pico de demanda ocorre em {nome_mes_pico}. A janela ótima de crédito foi ajustada para {janela}, "
+        f"com maior atratividade concentrada em {nome_mes_centro} e meses próximos."
+    )
 
     st.caption(resumo)
     return resumo, fig
+
+
+# =============== SERASA: EXTRAÇÃO E ANÁLISE ===============
+
+def extract_pdf_text(file) -> str:
+    text = ""
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text() or ""
+            text += page_text + "\n"
+    return text
+
+
+def parse_br_number(num_str: str):
+    try:
+        clean = num_str.replace(".", "").replace(",", ".").strip()
+        return float(clean)
+    except Exception:
+        return None
+
+
+def analyze_serasa_text(text: str) -> str:
+    """
+    Análise heurística simples de relatório Serasa:
+    - Endividamento com bancos
+    - Pagamento a fornecedores
+    - Situação de impostos (via inferência)
+    - Dica: protestos altos + bons fornecedores -> provável peso de impostos
+    """
+    tl = text.lower()
+
+    # --- Protestos (tentativa de capturar valor total) ---
+    protest_value = None
+    protest_match = re.search(r"protest[oa]s?.{0,80}?r\$\s*([\d\.\,]+)", text, flags=re.IGNORECASE | re.DOTALL)
+    if protest_match:
+        protest_value = parse_br_number(protest_match.group(1))
+
+    # Bom histórico de fornecedores?
+    frases_bom_fornecedor = [
+        "não foram encontradas pendências comerciais",
+        "não constam pendências comerciais",
+        "sem pendências comerciais",
+        "sem pendências com fornecedores"
+    ]
+    good_suppliers = any(frase in tl for frase in frases_bom_fornecedor)
+
+    # Indícios gerais de pendências comerciais
+    has_supplier_pendencias = "pendências comerciais" in tl or "pendencias comerciais" in tl
+
+    # Bancos / financeiras
+    bank_terms = [" banco ", "bancária", "bancario", "instituição financeira", "instituicoes financeiras",
+                  "financeira", "crédito bancário", "operacões de crédito", "operações de crédito"]
+    bank_hits = sum(tl.count(t) for t in bank_terms)
+
+    bank_negative = any(p in tl for p in ["atraso com bancos", "pendência com instituições financeiras",
+                                          "pendências com instituições financeiras",
+                                          "crédito bancário em atraso", "em atraso com instituições financeiras"])
+
+    # Impostos / tributos
+    tax_terms = ["dívida ativa", "divida ativa", "receita federal", "débito tributário", "debito tributario",
+                 "tributário", "tributario", "inss", "fgts", "icms", "iss", "imposto", "tributos"]
+    tax_hits = sum(tl.count(t) for t in tax_terms)
+
+    # --- Montagem da análise ---
+
+    # Bancos
+    if bank_hits == 0:
+        bancos_txt = "O relatório não traz elementos claros sobre endividamento com instituições financeiras; é recomendável validar com DFs e outras fontes."
+    elif bank_negative:
+        bancos_txt = "Há menções a pendências ou atrasos junto a instituições financeiras, indicando endividamento bancário com sinais de estresse."
+    else:
+        bancos_txt = "Existem referências a bancos/financeiras, mas sem evidência forte de atraso; o endividamento bancário parece presente, porém sem sinais claros de deterioração."
+
+    # Fornecedores
+    if good_suppliers:
+        fornecedores_txt = "O relatório indica bom histórico de pagamento a fornecedores na praça, sem pendências comerciais relevantes."
+    elif has_supplier_pendencias:
+        fornecedores_txt = "Constam pendências comerciais com fornecedores, o que sugere fragilidade na cadeia de pagamentos com a praça."
+    else:
+        fornecedores_txt = "Não há indicação clara de pendências comerciais com fornecedores; a situação parece neutra ou não detalhada."
+
+    # Impostos / tributos
+    if tax_hits > 0:
+        impostos_txt = "Há sinais de envolvimento com temas tributários (dívida ativa, Receita Federal ou débitos de impostos), sugerindo passivos fiscais que devem ser considerados na análise."
+    else:
+        impostos_txt = "O relatório não evidencia de forma explícita débitos tributários relevantes, ou essas informações não estão claras no texto extraído."
+
+    # Heurística: protestos altos + bons fornecedores -> provável imposto
+    dica_txt = ""
+    if protest_value is not None:
+        if protest_value >= 50000 and good_suppliers:
+            dica_txt = (
+                "Observa-se um valor elevado em protestos, mas com bom histórico de pagamento a fornecedores. "
+                "Essa combinação, na prática de análise de crédito, costuma indicar concentração de atrasos em "
+                "obrigações fiscais ou específicas (como tributos), o que é menos grave do que ruptura direta "
+                "da cadeia de fornecedores, embora ainda exija atenção na modelagem da operação."
+            )
+        elif protest_value >= 50000 and not good_suppliers:
+            dica_txt = (
+                "O valor de protestos é relevante e não há evidência de bom histórico com fornecedores, "
+                "o que aponta para um risco mais sensível de crédito, incluindo possíveis problemas na praça."
+            )
+        else:
+            dica_txt = (
+                "Há registro de protestos, mas em valor que não se mostra excessivamente elevado pelo texto capturado. "
+                "Ainda assim, é prudente cruzar as informações com balanços, DRE e fluxo de caixa projetado."
+            )
+    else:
+        dica_txt = (
+            "Não foi possível identificar com clareza o valor total de protestos no texto extraído. "
+            "Sugere-se conferir manualmente o quadro específico de protestos do relatório."
+        )
+
+    resumo = (
+        "Endividamento com bancos: " + bancos_txt + " "
+        "Histórico de pagamento a fornecedores: " + fornecedores_txt + " "
+        "Situação de impostos e tributos: " + impostos_txt + " "
+        + dica_txt
+    )
+
+    return resumo
+
+
+def serasa_section():
+    st.subheader("Análise de Relatório Serasa (PDF) – opcional")
+
+    if "serasa_resumo" not in st.session_state:
+        st.session_state["serasa_resumo"] = None
+
+    uploaded = st.file_uploader("Envie o relatório Serasa (PDF):", type=["pdf"], key="serasa_pdf")
+
+    if uploaded is not None:
+        if st.button("Analisar relatório Serasa"):
+            try:
+                text = extract_pdf_text(uploaded)
+                resumo = analyze_serasa_text(text)
+                st.session_state["serasa_resumo"] = resumo
+                st.success("Relatório Serasa analisado com sucesso.")
+            except Exception as e:
+                st.error(f"Não foi possível ler o PDF do Serasa. Detalhe técnico: {e}")
+
+    if st.session_state["serasa_resumo"]:
+        st.markdown("### Resumo da análise do Serasa")
+        st.write(st.session_state["serasa_resumo"])
+
+    return st.session_state["serasa_resumo"]
 
 
 # =============== APP STREAMLIT ===============
@@ -413,7 +561,7 @@ def main():
     st.set_page_config(page_title="IA de Crédito Empresarial - BRF", layout="wide")
 
     st.title("IA de Diagnóstico de Crédito Empresarial")
-    st.write("Baseada nos 6 C’s do crédito – versão BR Financial com parecer opinativo e sazonalidade.")
+    st.write("Baseada nos 6 C’s do crédito – versão BR Financial com parecer opinativo, sazonalidade e leitura de Serasa (PDF).")
 
     company_name = st.text_input("Nome da empresa analisada:", "")
 
@@ -448,17 +596,25 @@ def main():
     sazonalidade_resumo, _ = sazonalidade_section()
 
     st.markdown("---")
+    serasa_resumo = serasa_section()
+
+    st.markdown("---")
     if st.button("Gerar parecer e documento Word"):
-        if not company_name:
-            company_name_use = "Empresa Não Informada"
-        else:
-            company_name_use = company_name
+        company_name_use = company_name if company_name else "Empresa Não Informada"
 
         total_score = sum(c["score"] for c in category_scores.values())
         total_max = sum(c["max"] for c in category_scores.values())
         overall_percent = (total_score / total_max) * 100 if total_max > 0 else 0
 
-        report = generate_report(company_name_use, all_answers, category_scores, overall_percent, sazonalidade_resumo)
+        report = generate_report(
+            company_name_use,
+            all_answers,
+            category_scores,
+            overall_percent,
+            sazonalidade_resumo=sazonalidade_resumo,
+            serasa_resumo=serasa_resumo
+        )
+
         st.subheader("Parecer de crédito")
         st.text(report)
 
