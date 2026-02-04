@@ -317,7 +317,8 @@ def build_candidates(
     idx_wba_exact: Dict[Tuple, List[int]] = {}
     for row in wba.itertuples(index=False):
         key = (row.data, row.valor_cents, acct_key(row.conta_debito, row.conta_credito))
-        idx_wba_exact.setdefault(key, []).append(int(row.wba_idx))
+        idx_wba_exact.setdefault(key, []).append(int(row.wba_id))
+
 
     cand = {
         "exato": [],
@@ -328,7 +329,7 @@ def build_candidates(
     }
 
     # Para acesso rápido por índice
-    wba_by_idx = {int(r.wba_idx): r for r in wba.itertuples(index=False)}
+    wba_by_idx = {int(r.wba_id): r for r in wba.itertuples(index=False)}
 
     # 1) EXATO
     for c in contab.itertuples(index=False):
@@ -339,8 +340,9 @@ def build_candidates(
                 continue
             sd = similarity(c.historico, w.historico)
             cand["exato"].append(
-                MatchRow(int(c.contab_idx), int(wi), "exato", score=3.0 + sd,
-                         diff_dias=0, diff_valor=0.0, sim_desc=sd)
+                MatchRow(int(c.contab_id), int(wi), "exato", score=3.0 + sd, diff_dias=0, diff_valor=0.0, sim_desc=sd)
+            )
+
             )
 
     idx_wba_by_val: Dict[int, List[int]] = {}
@@ -365,7 +367,7 @@ def build_candidates(
                 dv = abs(float(c.valor) - float(w.valor))
                 score = (1.0 / (1 + dd)) + (1.0 / (1 + dv)) + sd
                 cand["mesmo_valor_data_perto"].append(
-                    MatchRow(int(c.contab_idx), int(wi), "mesmo_valor_data_perto", score, dd, dv, sd)
+                    MatchRow(int(c.contab_id), int(wi), "mesmo_valor_data_perto", score, dd, dv, sd)
                 )
 
     # 3) mesma data, valor parecido
@@ -383,7 +385,7 @@ def build_candidates(
                 sd = similarity(c.historico, w.historico)
                 score = (1.0 / (1 + dv)) + 1.5 + sd
                 cand["mesmo_dia_valor_parecido"].append(
-                    MatchRow(int(c.contab_idx), int(wi), "mesmo_dia_valor_parecido", score, dd, dv, sd)
+                    MatchRow(int(c.contab_id), int(wi), "mesmo_dia_valor_parecido", score, dd, dv, sd)
                 )
 
     # 4) valor parecido + data perto (atenção: O(n*m) — pode ser pesado em arquivos grandes)
@@ -399,7 +401,7 @@ def build_candidates(
                     dv = abs(float(c.valor) - float(w.valor))
                     score = (1.0 / (1 + dd)) + (1.0 / (1 + dv))
                     cand["valor_parecido_data_perto"].append(
-                        MatchRow(int(c.contab_idx), int(w.wba_idx), "valor_parecido_data_perto",
+                        MatchRow(int(c.contab_id), int(w.wba_idx), "valor_parecido_data_perto",
                                  score, dd, dv, 0.0)
                     )
 
@@ -551,8 +553,16 @@ def to_dual_records(contab: pd.DataFrame, wba: pd.DataFrame, matches: List[Match
 
     rows = []
     for m in matches:
-        c = contab.iloc[m.contab_idx] if m.contab_idx != -1 and len(contab) > 0 else None
-        w = wba.iloc[m.wba_idx]       if m.wba_idx != -1 and len(wba) > 0 else None
+        c = None
+        w = None
+        
+        if m.contab_idx is not None and m.contab_idx != -1:
+            if 0 <= m.contab_idx < len(contab):
+                c = contab.iloc[m.contab_idx]
+        
+        if m.wba_idx is not None and m.wba_idx != -1:
+            if 0 <= m.wba_idx < len(wba):
+                w = wba.iloc[m.wba_idx]
         rows.append({
             "ID CONTAB":         (int(m.contab_idx) if c is not None else None),
             "CONTA DEB CONTAB":  (c["conta_debito"] if c is not None else None),
