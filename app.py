@@ -343,7 +343,7 @@ def build_candidates(
                 MatchRow(int(c.contab_id), int(wi), "exato", score=3.0 + sd, diff_dias=0, diff_valor=0.0, sim_desc=sd)
             )
 
-            )
+            
 
     idx_wba_by_val: Dict[int, List[int]] = {}
     for row in wba.itertuples(index=False):
