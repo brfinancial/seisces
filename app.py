@@ -294,17 +294,22 @@ def build_candidates(
     limiar_desc: float,
 ) -> Dict[str, List[MatchRow]]:
     logging.info("Gerando candidatos...")
-    contab = contab.copy().reset_index().rename(columns={"index": "contab_idx"})
-    wba = wba.copy().reset_index().rename(columns={"index": "wba_idx"})
-
+    contab = contab.copy().reset_index(drop=True)
+    wba = wba.copy().reset_index(drop=True)
+    
     contab["valor_cents"] = contab["valor"].apply(cents)
     wba["valor_cents"] = wba["valor"].apply(cents)
-
-    contab = contab.dropna(subset=["valor_cents"]).copy()
-    wba = wba.dropna(subset=["valor_cents"]).copy()
-
+    
+    # remove inválidos e RESETA índice posicional
+    contab = contab.dropna(subset=["valor_cents"]).reset_index(drop=True)
+    wba = wba.dropna(subset=["valor_cents"]).reset_index(drop=True)
+    
     contab["valor_cents"] = contab["valor_cents"].astype(int)
     wba["valor_cents"] = wba["valor_cents"].astype(int)
+    
+    # cria ids fixos para export (opcional, mas ótimo)
+    contab["contab_id"] = np.arange(len(contab))
+    wba["wba_id"] = np.arange(len(wba))
 
     def acct_key(a, b) -> Tuple[str, str]:
         return (a, b) if a <= b else (b, a)
