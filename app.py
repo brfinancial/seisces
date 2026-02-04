@@ -1,788 +1,791 @@
-import math
+from __future__ import annotations
+
+import logging
+import os
 import re
-import textwrap
+import unicodedata
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
-import matplotlib.pyplot as plt
-import pdfplumber
+import numpy as np
+import pandas as pd
 import streamlit as st
-from docx import Document
-
-# =============== CONFIGURAÇÃO DAS PERGUNTAS ===============
-
-QUESTIONS = {
-    "Caráter": [
-        {"id": "caracter_hist_atrasos_desc", "type": "text",
-         "text": "Descreva, com sinceridade, o histórico da empresa em relação a atrasos com bancos, fornecedores e impostos nos últimos 24 meses."},
-        {"id": "caracter_hist_atrasos_nota", "type": "scale",
-         "text": "De 0 a 10, qual nota você daria para o cumprimento de prazos de pagamento da empresa? (0 = péssimo, 10 = sempre em dia)"},
-        {"id": "caracter_restricoes_desc", "type": "text",
-         "text": "Existem protestos, apontamentos em Serasa/Cartórios ou restrições em nome da empresa ou dos sócios? Descreva."},
-        {"id": "caracter_restricoes_nota", "type": "scale",
-         "text": "De 0 a 10, quão limpa você considera a situação cadastral da empresa e dos sócios? (0 = muito suja, 10 = totalmente limpa)"},
-        {"id": "caracter_reputacao_desc", "type": "text",
-         "text": "Como você descreveria a reputação da empresa junto a fornecedores, clientes e parceiros?"},
-        {"id": "caracter_reputacao_nota", "type": "scale",
-         "text": "De 0 a 10, qual nota você daria para a reputação da empresa no mercado?"},
-    ],
-    "Capacidade": [
-        {"id": "capacidade_fluxo_desc", "type": "text",
-         "text": "Descreva como está hoje o fluxo de caixa da empresa (entradas, saídas, aperto em determinados períodos etc.)."},
-        {"id": "capacidade_fluxo_nota", "type": "scale",
-         "text": "De 0 a 10, qual nota você daria para a capacidade atual da empresa de gerar caixa para pagar dívidas?"},
-        {"id": "capacidade_faturamento_desc", "type": "text",
-         "text": "Explique como está o faturamento dos últimos 12 meses (crescendo, caindo, estável)."},
-        {"id": "capacidade_faturamento_nota", "type": "scale",
-         "text": "De 0 a 10, quão confortável você está com o nível atual de faturamento para suportar novas dívidas?"},
-        {"id": "capacidade_endividamento_desc", "type": "text",
-         "text": "Descreva o nível de endividamento atual (bancos, factorings, fornecedores, impostos)."},
-        {"id": "capacidade_endividamento_nota", "type": "scale",
-         "text": "De 0 a 10, considerando tudo, qual nota você daria para a capacidade da empresa de assumir mais crédito sem se complicar?"},
-    ],
-    "Capital": [
-        {"id": "capital_estrutura_desc", "type": "text",
-         "text": "Descreva a estrutura financeira da empresa: possui reservas, capital próprio, patrimônio, bens em nome da empresa?"},
-        {"id": "capital_reservas_nota", "type": "scale",
-         "text": "De 0 a 10, qual nota você daria para o nível de reserva financeira e capital próprio da empresa?"},
-        {"id": "capital_patrimonio_desc", "type": "text",
-         "text": "Quais são os principais bens e ativos relevantes em nome da empresa (imóveis, máquinas, veículos etc.)?"},
-        {"id": "capital_patrimonio_nota", "type": "scale",
-         "text": "De 0 a 10, quão robusto você considera o patrimônio da empresa em relação ao tamanho do negócio?"},
-        {"id": "capital_resiliencia_desc", "type": "text",
-         "text": "Como a empresa costuma reagir a crises (perda de clientes, queda de faturamento, aumento de custo)?"},
-        {"id": "capital_resiliencia_nota", "type": "scale",
-         "text": "De 0 a 10, qual a capacidade da empresa de suportar períodos difíceis sem deixar de pagar suas obrigações?"},
-    ],
-    "Colateral": [
-        {"id": "colateral_bens_desc", "type": "text",
-         "text": "Que garantias a empresa poderia oferecer em uma operação de crédito (imóveis, veículos, máquinas, recebíveis)?"},
-        {"id": "colateral_bens_nota", "type": "scale",
-         "text": "De 0 a 10, quão fortes e líquidos você considera esses bens como garantia?"},
-        {"id": "colateral_recebiveis_desc", "type": "text",
-         "text": "A empresa possui carteira de recebíveis (duplicatas, boletos, cartões, contratos) que poderia ser usada como garantia? Descreva."},
-        {"id": "colateral_recebiveis_nota", "type": "scale",
-         "text": "De 0 a 10, qual a qualidade desses recebíveis (prazo, risco de inadimplência, concentração em poucos clientes)?"},
-        {"id": "colateral_avales_desc", "type": "text",
-         "text": "Os sócios estariam dispostos a dar garantias pessoais (aval, fiança) se necessário? Descreva."},
-        {"id": "colateral_avales_nota", "type": "scale",
-         "text": "De 0 a 10, quão confortável você considera a estrutura de garantias que a empresa conseguiria montar hoje?"},
-    ],
-    "Condições": [
-        {"id": "condicoes_setor_desc", "type": "text",
-         "text": "Descreva como está o momento do setor em que a empresa atua (expansão, crise, concorrência forte etc.)."},
-        {"id": "condicoes_setor_nota", "type": "scale",
-         "text": "De 0 a 10, quão favoráveis são as condições do setor para a empresa hoje?"},
-        {"id": "condicoes_economia_desc", "type": "text",
-         "text": "Como a situação econômica geral (juros, inflação, demanda) tem impactado a empresa?"},
-        {"id": "condicoes_economia_nota", "type": "scale",
-         "text": "De 0 a 10, quão confortável é o cenário econômico atual para assumir crédito?"},
-        {"id": "condicoes_operacao_desc", "type": "text",
-         "text": "Qual seria a finalidade principal do crédito (capital de giro, investimento, alongamento de dívida etc.)?"},
-        {"id": "condicoes_operacao_nota", "type": "scale",
-         "text": "De 0 a 10, quão coerente você considera a tomada de crédito com a realidade atual da empresa?"},
-    ],
-    "Conglomerado": [
-        {"id": "conglomerado_grupo_desc", "type": "text",
-         "text": "A empresa faz parte de um grupo econômico? Descreva rapidamente as empresas relacionadas e relações entre elas."},
-        {"id": "conglomerado_grupo_nota", "type": "scale",
-         "text": "De 0 a 10, quanto você considera que o grupo econômico fortalece a empresa (em vez de enfraquecer)?"},
-        {"id": "conglomerado_socios_desc", "type": "text",
-         "text": "Descreva o perfil dos sócios e da gestão (experiência, envolvimento no dia a dia, alinhamento)."},
-        {"id": "conglomerado_socios_nota", "type": "scale",
-         "text": "De 0 a 10, qual nota você daria para a qualidade da gestão e dos sócios da empresa?"},
-        {"id": "conglomerado_controles_desc", "type": "text",
-         "text": "A empresa possui controles internos, contabilidade organizada, relatórios financeiros e acompanhamento de indicadores? Descreva."},
-        {"id": "conglomerado_controles_nota", "type": "scale",
-         "text": "De 0 a 10, quão estruturada você considera a governança e os controles da empresa?"},
-    ]
-}
-
-# =============== HEURÍSTICAS AUXILIARES ===============
-
-POSITIVE_WORDS = [
-    "em dia", "pontual", "sem atrasos", "sem atraso", "crescente", "crescendo",
-    "estável", "aumentando", "melhorando", "reservas", "lucro", "lucrativo",
-    "sem restrição", "sem protesto", "limpo", "organizado", "estruturado",
-    "controle", "governança", "bom relacionamento", "boa reputação"
-]
-
-NEGATIVE_WORDS = [
-    "atraso", "atrasos", "inadimplência", "inadimplente", "protesto", "protestos",
-    "serasa", "restrição", "restrições", "crise", "queda", "caindo", "dificuldade",
-    "aperto", "negativo", "prejuízo", "endividado", "endividamento alto",
-    "sem reserva", "sem garantia", "desorganizado", "bagunça"
-]
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 
-def risk_color(percent: float) -> str:
-    if percent >= 80:
-        return "🟢 Verde (risco baixo)"
-    elif 60 <= percent < 80:
-        return "🟡 Amarelo (risco moderado)"
-    elif 40 <= percent < 60:
-        return "🟠 Laranja (risco elevado)"
-    else:
-        return "🔴 Vermelho (risco crítico)"
+# ============================ Config / UI =====================================
+
+st.set_page_config(
+    page_title="Conciliação WBA x Contabilidade",
+    layout="wide"
+)
+
+st.title("Conciliação WBA x Contabilidade (Diário)")
+st.caption(
+    "Faça upload dos arquivos da Contabilidade (layout Diário) e do WBA, ajuste os parâmetros e gere o Excel final."
+)
+
+# ============================ Logging =========================================
+
+def setup_logging_streamlit(verbosity: int = 1) -> None:
+    level = logging.INFO if verbosity == 1 else logging.DEBUG
+    fmt = "[%(asctime)s] %(levelname)s - %(message)s"
+    logging.basicConfig(format=fmt, level=level, datefmt="%H:%M:%S")
 
 
-def analyze_text_block(text: str, category: str) -> str:
-    t = text.lower()
-    pos = sum(t.count(w) for w in POSITIVE_WORDS)
-    neg = sum(t.count(w) for w in NEGATIVE_WORDS)
+# ============================ Utils texto/validação ===========================
 
-    if pos == 0 and neg == 0 and not t.strip():
-        return "Não houve informações qualitativas suficientes declaradas nessa dimensão para um diagnóstico mais fino."
+def strip_accents(text: str) -> str:
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    text = unicodedata.normalize("NFKD", text)
+    return "".join([c for c in text if not unicodedata.combining(c)])
 
-    if pos > neg:
-        base = "As respostas qualitativas indicam tendência mais positiva nessa dimensão, com alguns pontos que jogam a favor da empresa."
-    elif neg > pos:
-        base = "As respostas qualitativas sugerem presença de fragilidades relevantes nessa dimensão, exigindo atenção redobrada."
-    else:
-        base = "As respostas qualitativas mostram um cenário misto, com fatores positivos e negativos se equilibrando."
-
-    if category == "Caráter":
-        complemento = " Em Caráter, isso se traduz em histórico e postura que impactam diretamente a confiança na empresa."
-    elif category == "Capacidade":
-        complemento = " Em Capacidade, essa leitura afeta diretamente a percepção sobre geração de caixa e capacidade de honrar compromissos."
-    elif category == "Capital":
-        complemento = " Em Capital, isso reflete o quão preparada a empresa está estruturalmente para suportar choques e imprevistos."
-    elif category == "Colateral":
-        complemento = " Em Colateral, o foco é a consistência e qualidade das garantias que poderiam mitigar o risco assumido."
-    elif category == "Condições":
-        complemento = " Em Condições, a leitura recai sobre o ambiente externo e a aderência da tomada de crédito ao momento do negócio."
-    else:  # Conglomerado
-        complemento = " Em Conglomerado, essa percepção está ligada à força do grupo econômico, gestão e governança."
-
-    return base + complemento
-
-
-# =============== EXTRAÇÃO GENÉRICA DE PDF ===============
-
-def extract_pdf_text(file) -> str:
-    text = ""
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            text += page_text + "\n"
+def normalize_text(text: str) -> str:
+    text = strip_accents(text).lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
+def similarity(a: str, b: str) -> float:
+    import difflib
+    return difflib.SequenceMatcher(None, normalize_text(a), normalize_text(b)).ratio()
 
-def parse_br_number(num_str: str):
+def to_date(x) -> Optional[pd.Timestamp]:
+    return pd.to_datetime(x, dayfirst=True, errors="coerce")
+
+def to_float(x) -> float:
     try:
-        clean = num_str.replace(".", "").replace(",", ".").strip()
-        return float(clean)
+        if pd.isna(x):
+            return np.nan
+        return float(str(x).replace(",", "."))
     except Exception:
+        return np.nan
+
+def only_digits(x) -> str:
+    s = str(x) if x is not None else ""
+    return "".join(ch for ch in s if ch.isdigit())
+
+def account_norm(x) -> Optional[str]:
+    d = only_digits(x)
+    return d if d != "" else None
+
+def cents(v: float) -> Optional[int]:
+    if v is None or pd.isna(v):
+        return None
+    return int(np.rint(float(v) * 100.0))
+
+
+# ============================ Leitura Contabilidade (Diário) ==================
+
+def _try_header_map(df: pd.DataFrame) -> Dict[str, str]:
+    if df is None or df.shape[1] == 0:
+        return {}
+
+    cols_norm = {normalize_text(c): c for c in df.columns if isinstance(c, str)}
+
+    def find_first(keys: List[str]) -> Optional[str]:
+        for k in keys:
+            for cname_norm, cname_real in cols_norm.items():
+                if k in cname_norm:
+                    return cname_real
         return None
 
+    m = {}
+    m["data"]           = find_first(["data"])
+    m["conta_debito"]   = find_first(["conta debito", "conta débito", "debito", "débito", "conta origem", "cta deb"])
+    m["conta_credito"]  = find_first(["conta credito", "conta crédito", "credito", "crédito", "conta destino", "cta part", "cta c part"])
+    m["historico"]      = find_first(["historico", "hist", "histórico"])
+    m["valor"]          = find_first(["valor", "vlr"])
 
-# =============== ANÁLISE SERASA ===============
+    essentials = ["data", "conta_debito", "conta_credito", "historico", "valor"]
+    if all(m.get(k) for k in essentials):
+        return m
+    return {}
 
-def analyze_serasa_text(text: str) -> str:
-    tl = text.lower()
+def _parse_diario_positional(df: pd.DataFrame) -> pd.DataFrame:
+    ncols = df.shape[1]
 
-    protest_value = None
-    protest_match = re.search(r"protest[oa]s?.{0,80}?r\$\s*([\d\.\,]+)", text, flags=re.IGNORECASE | re.DOTALL)
-    if protest_match:
-        protest_value = parse_br_number(protest_match.group(1))
+    def col(i):
+        return df.iloc[:, i] if i < ncols else pd.Series([None] * len(df))
 
-    frases_bom_fornecedor = [
-        "não foram encontradas pendências comerciais",
-        "não constam pendências comerciais",
-        "sem pendências comerciais",
-        "sem pendências com fornecedores"
-    ]
-    good_suppliers = any(frase in tl for frase in frases_bom_fornecedor)
-    has_supplier_pendencias = "pendências comerciais" in tl or "pendencias comerciais" in tl
+    # Layout posicional:
+    # A: data | D: conta_debito | F/G: conta_credito | I: historico | N/O: valor
+    data_col = col(0).apply(to_date).dt.date
+    conta_debito_col = col(3).apply(account_norm)
 
-    bank_terms = [" banco ", "bancária", "bancario", "instituição financeira", "instituicoes financeiras",
-                  "financeira", "crédito bancário", "operações de crédito", "operacoes de credito"]
-    bank_hits = sum(tl.count(t) for t in bank_terms)
+    conta_credito_col = []
+    for f, g in zip(col(5), col(6)):
+        cc = account_norm(f) if pd.notna(f) and str(f).strip() != "" else account_norm(g)
+        conta_credito_col.append(cc)
+    conta_credito_col = pd.Series(conta_credito_col)
 
-    bank_negative = any(p in tl for p in [
-        "atraso com bancos", "pendência com instituições financeiras",
-        "pendências com instituições financeiras", "crédito bancário em atraso",
-        "em atraso com instituições financeiras"
-    ])
+    historico_col = col(8).astype(str)
 
-    tax_terms = ["dívida ativa", "divida ativa", "receita federal", "débito tributário", "debito tributario",
-                 "tributário", "tributario", "inss", "fgts", "icms", "iss", "imposto", "tributos"]
-    tax_hits = sum(tl.count(t) for t in tax_terms)
+    valor_col = []
+    for n, o in zip(col(13), col(14)):
+        v = to_float(n) if pd.notna(n) and str(n).strip() != "" else to_float(o)
+        valor_col.append(v)
+    valor_col = pd.Series(valor_col)
 
-    if bank_hits == 0:
-        bancos_txt = "O relatório não traz elementos claros sobre endividamento com instituições financeiras; é recomendável validar com DFs e outras fontes."
-    elif bank_negative:
-        bancos_txt = "Há menções a pendências ou atrasos junto a instituições financeiras, indicando endividamento bancário com sinais de estresse."
-    else:
-        bancos_txt = "Existem referências a bancos/financeiras, mas sem evidência forte de atraso; o endividamento bancário parece presente, porém sem sinais claros de deterioração."
+    df2 = pd.DataFrame({
+        "data": data_col,
+        "conta_debito": conta_debito_col,
+        "conta_credito": conta_credito_col,
+        "historico": historico_col,
+        "valor": valor_col
+    })
 
-    if good_suppliers:
-        fornecedores_txt = "O relatório indica bom histórico de pagamento a fornecedores na praça, sem pendências comerciais relevantes."
-    elif has_supplier_pendencias:
-        fornecedores_txt = "Constam pendências comerciais com fornecedores, o que sugere fragilidade na cadeia de pagamentos com a praça."
-    else:
-        fornecedores_txt = "Não há indicação clara de pendências comerciais com fornecedores; a situação parece neutra ou não detalhada."
+    df2 = df2.dropna(subset=["data", "conta_debito", "conta_credito", "valor"])
+    df2 = df2[df2["valor"] > 0]
+    return df2.reset_index(drop=True)
 
-    if tax_hits > 0:
-        impostos_txt = "Há sinais de envolvimento com temas tributários (dívida ativa, Receita Federal ou débitos de impostos), sugerindo passivos fiscais que devem ser considerados na análise."
-    else:
-        impostos_txt = "O relatório não evidencia de forma explícita débitos tributários relevantes, ou essas informações não estão claras no texto extraído."
+def read_contabilidade_to_standard(path_or_buffer: Union[str, BytesIO]) -> pd.DataFrame:
+    logging.info("Lendo Contabilidade (Diário)")
+    try:
+        df_hdr = pd.read_excel(path_or_buffer, sheet_name=0, header=0, engine="openpyxl")
+        map_hdr = _try_header_map(df_hdr)
+        if map_hdr:
+            logging.debug(f"Mapeamento por cabeçalho detectado: {map_hdr}")
+            df = df_hdr.rename(columns={
+                map_hdr["data"]: "data",
+                map_hdr["conta_debito"]: "conta_debito",
+                map_hdr["conta_credito"]: "conta_credito",
+                map_hdr["historico"]: "historico",
+                map_hdr["valor"]: "valor",
+            }).copy()
 
-    if protest_value is not None:
-        if protest_value >= 50000 and good_suppliers:
-            dica_txt = (
-                "Observa-se um valor elevado em protestos, mas com bom histórico de pagamento a fornecedores. "
-                "Essa combinação, na prática de análise de crédito, costuma indicar concentração de atrasos em "
-                "obrigações fiscais ou específicas (como tributos), o que é menos grave do que ruptura direta "
-                "da cadeia de fornecedores, embora ainda exija atenção na modelagem da operação."
-            )
-        elif protest_value >= 50000 and not good_suppliers:
-            dica_txt = (
-                "O valor de protestos é relevante e não há evidência de bom histórico com fornecedores, "
-                "o que aponta para um risco mais sensível de crédito, incluindo possíveis problemas na praça."
-            )
+            df["data"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce").dt.date
+            df["conta_debito"] = df["conta_debito"].apply(account_norm)
+            df["conta_credito"] = df["conta_credito"].apply(account_norm)
+            df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+            df["historico"] = df["historico"].astype(str)
+
+            df = df.dropna(subset=["data", "conta_debito", "conta_credito", "valor"])
+            df = df[df["valor"] > 0]
         else:
-            dica_txt = (
-                "Há registro de protestos, mas em valor que não se mostra excessivamente elevado pelo texto capturado. "
-                "Ainda assim, é prudente cruzar as informações com balanços, DRE e fluxo de caixa projetado."
+            # Sem cabeçalho útil -> posicional
+            df_raw = pd.read_excel(path_or_buffer, sheet_name=0, header=None, engine="openpyxl")
+            df = _parse_diario_positional(df_raw)
+    except Exception:
+        logging.error("Falha ao ler o Diário pelo cabeçalho; tentando posicional...", exc_info=True)
+        df_raw = pd.read_excel(path_or_buffer, sheet_name=0, header=None, engine="openpyxl")
+        df = _parse_diario_positional(df_raw)
+
+    logging.info(f"Contabilidade normalizada (sem deduplicação): {len(df)} linhas.")
+    return df
+
+
+# ============================ Leitura WBA =====================================
+
+def _wba_map_columns(df: pd.DataFrame) -> Dict[str, str]:
+    cols = {normalize_text(str(c)): c for c in df.columns}
+
+    def pick(candidates: List[str]) -> Optional[str]:
+        for can in candidates:
+            for k, v in cols.items():
+                if can in k:
+                    return v
+        return None
+
+    deb  = pick(["deb", "cta.", "conta debito", "cta deb", "cta debito"])
+    cred = pick(["cred", "cta.c.part", "cta c part", "conta credito", "cta part", "cta credito"])
+    vlr  = pick(["vlr", "valor"])
+    dt   = pick(["data"])
+    hist = pick(["hist", "descr", "descricao"])
+
+    need = [deb, cred, vlr, dt, hist]
+    if any(x is None for x in need):
+        raise ValueError(f"Falha ao mapear colunas do WBA. Recebi: {list(df.columns)}")
+
+    return {
+        "conta_debito": deb,
+        "conta_credito": cred,
+        "valor": vlr,
+        "data": dt,
+        "historico": hist,
+    }
+
+def _strip_leading_equals_in_series(s: pd.Series) -> pd.Series:
+    s = s.astype("string")
+    s = s.str.replace(r'^\s*=\s*', '', regex=True)
+    s = s.str.strip()
+    return s
+
+def read_wba_to_standard(path_or_buffer: Union[str, BytesIO]) -> pd.DataFrame:
+    logging.info("Lendo WBA")
+    df_raw = pd.read_excel(path_or_buffer, engine="openpyxl")
+    if df_raw.empty:
+        return pd.DataFrame(columns=["conta_debito", "conta_credito", "valor", "data", "historico"])
+
+    colmap = _wba_map_columns(df_raw)
+
+    # Limpa '=' no começo do histórico ANTES do rename
+    if colmap["historico"] in df_raw.columns:
+        df_raw[colmap["historico"]] = _strip_leading_equals_in_series(df_raw[colmap["historico"]])
+
+    df = df_raw.rename(columns=colmap)[["conta_debito", "conta_credito", "valor", "data", "historico"]].copy()
+
+    # Segurança extra
+    df["historico"] = _strip_leading_equals_in_series(df["historico"])
+
+    for c in ["conta_debito", "conta_credito"]:
+        df[c] = df[c].apply(account_norm)
+
+    df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+    df["data"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce").dt.date
+    df["historico"] = df["historico"].astype(str)
+
+    df = df.dropna(subset=["conta_debito", "conta_credito", "valor", "data"]).copy()
+    df = df[df["valor"] > 0]
+
+    logging.info(f"WBA normalizado (sem deduplicação): {len(df)} linhas.")
+    return df
+
+
+# ============================ Matching Engine =================================
+
+@dataclass(frozen=True)
+class MatchRow:
+    contab_idx: int
+    wba_idx: int
+    tipo: str
+    score: float
+    diff_dias: int
+    diff_valor: float
+    sim_desc: float
+
+def _days_diff(d1, d2) -> int:
+    return abs((pd.to_datetime(d1) - pd.to_datetime(d2)).days)
+
+def _acct_set_equal(a1, b1, a2, b2) -> bool:
+    return {a1, b1} == {a2, b2}
+
+def build_candidates(
+    contab: pd.DataFrame,
+    wba: pd.DataFrame,
+    janela_dias: int,
+    tol_valor_cents: int,
+    limiar_desc: float,
+) -> Dict[str, List[MatchRow]]:
+    logging.info("Gerando candidatos...")
+    contab = contab.copy().reset_index().rename(columns={"index": "contab_idx"})
+    wba = wba.copy().reset_index().rename(columns={"index": "wba_idx"})
+
+    contab["valor_cents"] = contab["valor"].apply(cents)
+    wba["valor_cents"] = wba["valor"].apply(cents)
+
+    contab = contab.dropna(subset=["valor_cents"]).copy()
+    wba = wba.dropna(subset=["valor_cents"]).copy()
+
+    contab["valor_cents"] = contab["valor_cents"].astype(int)
+    wba["valor_cents"] = wba["valor_cents"].astype(int)
+
+    def acct_key(a, b) -> Tuple[str, str]:
+        return (a, b) if a <= b else (b, a)
+
+    idx_wba_exact: Dict[Tuple, List[int]] = {}
+    for row in wba.itertuples(index=False):
+        key = (row.data, row.valor_cents, acct_key(row.conta_debito, row.conta_credito))
+        idx_wba_exact.setdefault(key, []).append(int(row.wba_idx))
+
+    cand = {
+        "exato": [],
+        "mesmo_valor_data_perto": [],
+        "mesmo_dia_valor_parecido": [],
+        "valor_parecido_data_perto": [],
+        "fuzzy": [],
+    }
+
+    # Para acesso rápido por índice
+    wba_by_idx = {int(r.wba_idx): r for r in wba.itertuples(index=False)}
+
+    # 1) EXATO
+    for c in contab.itertuples(index=False):
+        key = (c.data, c.valor_cents, acct_key(c.conta_debito, c.conta_credito))
+        for wi in idx_wba_exact.get(key, []):
+            w = wba_by_idx.get(int(wi))
+            if w is None:
+                continue
+            sd = similarity(c.historico, w.historico)
+            cand["exato"].append(
+                MatchRow(int(c.contab_idx), int(wi), "exato", score=3.0 + sd,
+                         diff_dias=0, diff_valor=0.0, sim_desc=sd)
             )
-    else:
-        dica_txt = (
-            "Não foi possível identificar com clareza o valor total de protestos no texto extraído. "
-            "Sugere-se conferir manualmente o quadro específico de protestos do relatório."
-        )
 
-    resumo = (
-        "Endividamento com bancos: " + bancos_txt + " "
-        "Histórico de pagamento a fornecedores: " + fornecedores_txt + " "
-        "Situação de impostos e tributos: " + impostos_txt + " "
-        + dica_txt
-    )
+    idx_wba_by_val: Dict[int, List[int]] = {}
+    for row in wba.itertuples(index=False):
+        idx_wba_by_val.setdefault(int(row.valor_cents), []).append(int(row.wba_idx))
 
-    return resumo
+    idx_wba_by_date: Dict[object, List[int]] = {}
+    for row in wba.itertuples(index=False):
+        idx_wba_by_date.setdefault(row.data, []).append(int(row.wba_idx))
 
+    # 2) valor igual, data perto
+    for c in contab.itertuples(index=False):
+        for wi in idx_wba_by_val.get(int(c.valor_cents), []):
+            w = wba_by_idx.get(int(wi))
+            if w is None:
+                continue
+            if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
+                continue
+            dd = _days_diff(c.data, w.data)
+            if 0 < dd <= janela_dias:
+                sd = similarity(c.historico, w.historico)
+                dv = abs(float(c.valor) - float(w.valor))
+                score = (1.0 / (1 + dd)) + (1.0 / (1 + dv)) + sd
+                cand["mesmo_valor_data_perto"].append(
+                    MatchRow(int(c.contab_idx), int(wi), "mesmo_valor_data_perto", score, dd, dv, sd)
+                )
 
-def serasa_section():
-    st.subheader("Análise de Relatório Serasa (PDF) – opcional")
+    # 3) mesma data, valor parecido
+    for c in contab.itertuples(index=False):
+        for wi in idx_wba_by_date.get(c.data, []):
+            w = wba_by_idx.get(int(wi))
+            if w is None:
+                continue
+            if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
+                continue
+            dv_cents = abs(int(c.valor_cents) - int(w.valor_cents))
+            if 0 < dv_cents <= tol_valor_cents:
+                dd = 0
+                dv = abs(float(c.valor) - float(w.valor))
+                sd = similarity(c.historico, w.historico)
+                score = (1.0 / (1 + dv)) + 1.5 + sd
+                cand["mesmo_dia_valor_parecido"].append(
+                    MatchRow(int(c.contab_idx), int(wi), "mesmo_dia_valor_parecido", score, dd, dv, sd)
+                )
 
-    if "serasa_resumo" not in st.session_state:
-        st.session_state["serasa_resumo"] = None
+    # 4) valor parecido + data perto (atenção: O(n*m) — pode ser pesado em arquivos grandes)
+    wba_rows = list(wba.itertuples(index=False))
+    for c in contab.itertuples(index=False):
+        for w in wba_rows:
+            if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
+                continue
+            dd = _days_diff(c.data, w.data)
+            if 0 < dd <= janela_dias:
+                dv_cents = abs(int(c.valor_cents) - int(w.valor_cents))
+                if 0 < dv_cents <= tol_valor_cents:
+                    dv = abs(float(c.valor) - float(w.valor))
+                    score = (1.0 / (1 + dd)) + (1.0 / (1 + dv))
+                    cand["valor_parecido_data_perto"].append(
+                        MatchRow(int(c.contab_idx), int(w.wba_idx), "valor_parecido_data_perto",
+                                 score, dd, dv, 0.0)
+                    )
 
-    uploaded = st.file_uploader("Envie o relatório Serasa (PDF):", type=["pdf"], key="serasa_pdf")
+    # 5) fuzzy
+    for c in contab.itertuples(index=False):
+        for w in wba_rows:
+            if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
+                continue
+            dd = _days_diff(c.data, w.data)
+            if dd <= janela_dias:
+                dv_cents = abs(int(c.valor_cents) - int(w.valor_cents))
+                if dv_cents <= tol_valor_cents:
+                    sd = similarity(c.historico, w.historico)
+                    if sd >= limiar_desc:
+                        dv = abs(float(c.valor) - float(w.valor))
+                        score = (1.0 / (1 + dd)) + (1.0 / (1 + dv)) + sd
+                        cand["fuzzy"].append(
+                            MatchRow(int(c.contab_idx), int(w.wba_idx), "fuzzy",
+                                     score, dd, dv, sd)
+                        )
 
-    if uploaded is not None:
-        if st.button("Analisar relatório Serasa"):
-            try:
-                text = extract_pdf_text(uploaded)
-                resumo = analyze_serasa_text(text)
-                st.session_state["serasa_resumo"] = resumo
-                st.success("Relatório Serasa analisado com sucesso.")
-            except Exception as e:
-                st.error(f"Não foi possível ler o PDF do Serasa. Detalhe técnico: {e}")
+    for k in cand:
+        cand[k].sort(key=lambda r: r.score, reverse=True)
 
-    if st.session_state["serasa_resumo"]:
-        st.markdown("### Resumo da análise do Serasa")
-        st.write(st.session_state["serasa_resumo"])
+    return cand
 
-    return st.session_state["serasa_resumo"]
+def greedy_resolve(
+    contab: pd.DataFrame,
+    wba: pd.DataFrame,
+    cand: Dict[str, List[MatchRow]],
+) -> Dict[str, List[MatchRow]]:
+    logging.info("Resolvendo conflitos (1-para-1)...")
+    assigned_c = set()
+    assigned_w = set()
+    result = {k: [] for k in cand.keys()}
 
+    priority = ["exato", "mesmo_valor_data_perto",
+                "mesmo_dia_valor_parecido", "valor_parecido_data_perto", "fuzzy"]
+    for tier in priority:
+        for m in cand[tier]:
+            if (m.contab_idx not in assigned_c) and (m.wba_idx not in assigned_w):
+                result[tier].append(m)
+                assigned_c.add(m.contab_idx)
+                assigned_w.add(m.wba_idx)
 
-# =============== ANÁLISE SISBACEN / SCR ===============
+    all_c = set(range(len(contab)))
+    all_w = set(range(len(wba)))
 
-def analyze_sisbacen_text(text: str) -> str:
-    """
-    Leitura heurística de um relatório SISBACEN/SCR:
-    - Exposição com bancos
-    - Presença de atrasos / risco elevado
-    - Operações baixadas a prejuízo
-    - Humaniza o parecer bancário
-    """
-    tl = text.lower()
+    matched_c = set().union(*[set(x.contab_idx for x in result[t]) for t in result])
+    matched_w = set().union(*[set(x.wba_idx for x in result[t]) for t in result])
 
-    # Sinais de exposição relevante
-    termos_exposicao = [
-        "exposição total", "exposicao total", "saldo devedor", "limite contratado",
-        "valor total das operações", "operações de crédito", "operacoes de credito",
-        "risco total"
+    result["so_contabilidade"] = [
+        MatchRow(ci, -1, "so_contabilidade", 0.0, 0, 0.0, 0.0)
+        for ci in sorted(all_c - matched_c)
     ]
-    exp_hits = sum(tl.count(t) for t in termos_exposicao)
-
-    # Sinais de atraso / classificação de risco ruim
-    termos_atraso = [
-        "em atraso", "vencida", "vencidas", "vencidos", "inadimplência", "inadimplente",
-        "atraso superior", "faixa de atraso", "dias de atraso"
+    result["so_wba"] = [
+        MatchRow(-1, wi, "so_wba", 0.0, 0, 0.0, 0.0)
+        for wi in sorted(all_w - matched_w)
     ]
-    atraso_hits = sum(tl.count(t) for t in termos_atraso)
+    return result
 
-    # Classificações de risco típicas (AA, A, B, C, D, E, F, G, H)
-    classes_ruins = ["risco e", "risco f", "risco g", "risco h", "classificação e", "classificação f",
-                     "classificacao e", "classificacao f", "classificacao g", "classificacao h"]
-    risco_ruim_hits = sum(tl.count(c) for c in classes_ruins)
 
-    # Operações baixadas a prejuízo
-    termos_prejuizo = [
-        "baixa a prejuízo", "baixa a prejuizo", "baixada para prejuízo", "baixada para prejuizo",
-        "operações baixadas como prejuízo", "operacoes baixadas como prejuizo"
+# ============================ Exportação Excel =================================
+
+def _format_dual_area_sheet(ws):
+    blue_fill  = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
+    green_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    bold_font  = Font(bold=True)
+    center_v   = Alignment(vertical="center")
+
+    for col_idx in range(1, 7):   # A..F (Contab)
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = blue_fill
+        cell.font = bold_font
+        cell.alignment = center_v
+
+    for col_idx in range(7, 12+1):   # G..L (WBA)
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = green_fill
+        cell.font = bold_font
+        cell.alignment = center_v
+
+    thick = Side(style="thick", color="000000")
+    for row in range(1, ws.max_row + 1):
+        ws.cell(row=row, column=6).border = Border(right=thick)  # F
+        ws.cell(row=row, column=7).border = Border(left=thick)   # G
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+    widths = {
+        1: 14, 2: 16, 3: 16, 4: 12, 5: 14, 6: 40,
+        7: 14, 8: 16, 9: 16, 10: 12, 11: 14, 12: 40
+    }
+    for col_idx, w in widths.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = w
+
+    date_fmt = "DD/MM/YY"
+    currency_fmt = 'R$ #,##0.00'
+    for r in range(2, ws.max_row + 1):
+        ws.cell(row=r, column=4).number_format = date_fmt
+        ws.cell(row=r, column=5).number_format = currency_fmt
+        ws.cell(row=r, column=10).number_format = date_fmt
+        ws.cell(row=r, column=11).number_format = currency_fmt
+
+def _format_simple_sheet(ws):
+    bold = Font(bold=True)
+    if ws.max_row >= 1:
+        for c in ws[1]:
+            c.font = bold
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+    # Autoajuste de coluna (limite de 60)
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            v = "" if cell.value is None else str(cell.value)
+            max_len = max(max_len, len(v))
+        ws.column_dimensions[col_letter].width = min(max(12, max_len + 2), 60)
+
+def _write_sheet(writer: pd.ExcelWriter, df: pd.DataFrame, name: str, dual: bool = False):
+    if df is None:
+        df = pd.DataFrame()
+
+    # Se vier vazio sem colunas, ainda escreve um cabeçalho padrão
+    if df.shape[1] == 0:
+        df = pd.DataFrame(columns=[
+            "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "DATA CONTAB", "VALOR CONTAB", "HIST CONTAB",
+            "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA"
+        ])
+
+    df.to_excel(writer, sheet_name=name, index=False)
+    ws = writer.book[name]
+    if dual:
+        _format_dual_area_sheet(ws)
+    else:
+        _format_simple_sheet(ws)
+    return True
+
+def to_dual_records(contab: pd.DataFrame, wba: pd.DataFrame, matches: List[MatchRow]) -> pd.DataFrame:
+    cols = [
+        "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "DATA CONTAB", "VALOR CONTAB", "HIST CONTAB",
+        "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA"
     ]
-    prejuizo_hits = sum(tl.count(t) for t in termos_prejuizo)
+    if matches is None or len(matches) == 0:
+        return pd.DataFrame(columns=cols)
 
-    # Tentativa simples de achar algum valor de exposição total
-    exp_valor = None
-    exp_match = re.search(r"(exposi[cç][aã]o total|risco total|valor total das opera[cç][õo]es).{0,80}?r\$\s*([\d\.\,]+)",
-                          text, flags=re.IGNORECASE | re.DOTALL)
-    if exp_match:
-        exp_valor = parse_br_number(exp_match.group(2))
+    rows = []
+    for m in matches:
+        c = contab.iloc[m.contab_idx] if m.contab_idx != -1 and len(contab) > 0 else None
+        w = wba.iloc[m.wba_idx]       if m.wba_idx != -1 and len(wba) > 0 else None
+        rows.append({
+            "ID CONTAB":         (int(m.contab_idx) if c is not None else None),
+            "CONTA DEB CONTAB":  (c["conta_debito"] if c is not None else None),
+            "CONTA CRED CONTAB": (c["conta_credito"] if c is not None else None),
+            "DATA CONTAB":       (c["data"] if c is not None else None),
+            "VALOR CONTAB":      (round(float(c["valor"]), 2) if c is not None else None),
+            "HIST CONTAB":       (c["historico"] if c is not None else None),
 
-    # Montagem da análise humanizada
+            "ID WBA":            (int(m.wba_idx) if w is not None else None),
+            "CONTA DEB WBA":     (w["conta_debito"] if w is not None else None),
+            "CONTA CRED WBA":    (w["conta_credito"] if w is not None else None),
+            "DATA WBA":          (w["data"] if w is not None else None),
+            "VALOR WBA":         (round(float(w["valor"]), 2) if w is not None else None),
+            "HIST WBA":          (w["historico"] if w is not None else None),
+        })
 
-    # 1) Exposição bancária
-    if exp_valor is not None:
-        if exp_valor < 100000:
-            exp_txt = f"A exposição bancária total identificada gira em torno de R$ {exp_valor:,.2f}, em patamar relativamente contido para a maioria das PMEs."
-        elif exp_valor < 500000:
-            exp_txt = f"A exposição bancária total estimada é de aproximadamente R$ {exp_valor:,.2f}, o que indica uso relevante de linhas bancárias, porém ainda administrável dependendo do faturamento."
-        else:
-            exp_txt = f"A exposição bancária total aparenta ser elevada, na casa de cerca de R$ {exp_valor:,.2f}, sugerindo alavancagem relevante junto ao sistema financeiro."
-    else:
-        if exp_hits > 0:
-            exp_txt = "O relatório menciona saldos de operações de crédito e exposição com bancos, mas o valor total não pôde ser determinado de forma clara pelo texto extraído."
-        else:
-            exp_txt = "Não foi possível identificar com clareza o montante de exposição total com bancos; recomenda-se consultar diretamente os quadros de valores do relatório."
+    df = pd.DataFrame(rows)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.Series(dtype="object")
+    return df[cols]
 
-    # 2) Comportamento de atraso / risco
-    if risco_ruim_hits > 0 or atraso_hits > 5:
-        comportamento_txt = (
-            "O histórico bancário apresenta sinais de atraso e/ou classificação de risco em faixas mais pressionadas "
-            "(como E, F, G ou H), indicando que parte relevante das operações já transitou para um patamar de maior risco."
-        )
-        perfil_risco = "pressionado/crítico"
-    elif atraso_hits > 0:
-        comportamento_txt = (
-            "Há registros de atraso em algumas operações, mas sem indicação consistente de concentração nas piores faixas "
-            "de risco. Ainda assim, é um ponto de atenção na concessão de novos créditos."
-        )
-        perfil_risco = "moderado"
-    else:
-        comportamento_txt = (
-            "Não foram identificadas referências fortes a atrasos ou níveis de risco críticos, sugerindo um histórico "
-            "de relacionamento bancário relativamente bem comportado."
-        )
-        perfil_risco = "saudável"
+def compute_data_valor_conta_divergente(so_contab: pd.DataFrame, so_wba: pd.DataFrame) -> pd.DataFrame:
+    base_cols = [
+        "DATA CONTAB", "VALOR CONTAB_R",
+        "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "HIST CONTAB",
+        "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA",
+        "DEBITO_IGUAL", "CREDITO_IGUAL"
+    ]
 
-    # 3) Operações baixadas a prejuízo
-    if prejuizo_hits > 0:
-        prejuizo_txt = (
-            "Constam operações baixadas a prejuízo, o que indica que, em algum momento, instituições financeiras "
-            "tiveram de reconhecer perda efetiva com o tomador. Esse é um sinal relevante e pesa de forma negativa "
-            "na análise de crédito, exigindo estruturação mais conservadora das operações e, se possível, apoio em garantias."
-        )
-        tem_prejuizo = True
-    else:
-        prejuizo_txt = (
-            "Não foram identificadas, no texto extraído, menções claras a operações baixadas a prejuízo, o que reduz "
-            "a percepção de histórico de default bancário extremo."
-        )
-        tem_prejuizo = False
+    min_sc = {"DATA CONTAB", "VALOR CONTAB", "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB"}
+    min_sw = {"DATA WBA", "VALOR WBA", "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA"}
 
-    # 4) Conclusão humanizada (tom bancário x factoring)
-    if perfil_risco == "saudável" and not tem_prejuizo:
-        conclusao_txt = (
-            "De forma geral, o quadro bancário sugere um tomador que utiliza o sistema financeiro de maneira relativamente "
-            "organizada, sem sinais contundentes de estresse prolongado. Para fins de fomento/factoring, isso abre espaço "
-            "para operações com limites compatíveis ao faturamento, mantendo disciplina de monitoramento."
-        )
-    elif perfil_risco == "moderado" and not tem_prejuizo:
-        conclusao_txt = (
-            "O conjunto das informações indica um tomador com relacionamento bancário já um pouco tensionado, "
-            "mas ainda recuperável. A recomendação é trabalhar com limites mais enxutos, prazos mais curtos e "
-            "cláusulas que permitam rápida reação em caso de piora, usando o fomento mais como ferramenta de "
-            "organização do fluxo de caixa do que de alavancagem adicional agressiva."
-        )
-    else:
-        conclusao_txt = (
-            "O histórico bancário aponta para um perfil de maior risco, seja pelo acúmulo de atrasos em faixas ruins "
-            "de classificação, seja pela presença de operações baixadas a prejuízo. Isso sugere que a empresa já "
-            "enfrentou momentos de estresse considerável com bancos. Nessa situação, qualquer concessão de crédito "
-            "deve ser pensada de forma muito criteriosa, com foco em operações estruturadas, valores menores, "
-            "prazos curtos e, sempre que possível, reforço de garantias ou vinculação direta a recebíveis de boa qualidade."
-        )
+    if (so_contab is None) or (so_wba is None):
+        return pd.DataFrame(columns=base_cols)
+    if not min_sc.issubset(set(so_contab.columns)) or not min_sw.issubset(set(so_wba.columns)):
+        return pd.DataFrame(columns=base_cols)
+    if so_contab.empty or so_wba.empty:
+        return pd.DataFrame(columns=base_cols)
 
-    resumo = (
-        "Exposição com bancos: " + exp_txt + " "
-        "Comportamento de atraso e risco: " + comportamento_txt + " "
-        "Operações baixadas a prejuízo: " + prejuizo_txt + " "
-        + conclusao_txt
+    sc = so_contab.copy()
+    sw = so_wba.copy()
+
+    sc["DATA CONTAB"] = pd.to_datetime(sc["DATA CONTAB"], errors="coerce").dt.date
+    sw["DATA WBA"] = pd.to_datetime(sw["DATA WBA"], errors="coerce").dt.date
+    sc["VALOR CONTAB_R"] = pd.to_numeric(sc["VALOR CONTAB"], errors="coerce").round(2)
+    sw["VALOR WBA_R"] = pd.to_numeric(sw["VALOR WBA"], errors="coerce").round(2)
+
+    sc = sc.dropna(subset=["DATA CONTAB", "VALOR CONTAB_R"])
+    sw = sw.dropna(subset=["DATA WBA", "VALOR WBA_R"])
+    if sc.empty or sw.empty:
+        return pd.DataFrame(columns=base_cols)
+
+    sc["key"] = list(zip(sc["DATA CONTAB"], sc["VALOR CONTAB_R"]))
+    sw["key"] = list(zip(sw["DATA WBA"], sw["VALOR WBA_R"]))
+
+    key_c = sc.groupby("key").size().rename("n_c")
+    key_w = sw.groupby("key").size().rename("n_w")
+    if key_c.empty or key_w.empty:
+        return pd.DataFrame(columns=base_cols)
+
+    unique_keys = (
+        key_c.to_frame()
+        .join(key_w, how="inner")
+        .query("n_c == 1 and n_w == 1")
+        .index
+    )
+    if len(unique_keys) == 0:
+        return pd.DataFrame(columns=base_cols)
+
+    sc_sub = (
+        sc.set_index("key").loc[list(unique_keys)].reset_index()[[
+            "key", "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "DATA CONTAB", "VALOR CONTAB", "HIST CONTAB", "VALOR CONTAB_R"
+        ]]
+    )
+    sw_sub = (
+        sw.set_index("key").loc[list(unique_keys)].reset_index()[[
+            "key", "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA", "VALOR WBA_R"
+        ]]
     )
 
-    return resumo
+    pairs = sc_sub.merge(sw_sub, on="key", how="inner")
+    if pairs.empty:
+        return pd.DataFrame(columns=base_cols)
 
+    pairs["DEBITO_IGUAL"] = (pairs["CONTA DEB CONTAB"] == pairs["CONTA DEB WBA"])
+    pairs["CREDITO_IGUAL"] = (pairs["CONTA CRED CONTAB"] == pairs["CONTA CRED WBA"])
 
-def sisbacen_section():
-    st.subheader("Análise de Relatório SISBACEN / SCR (PDF) – opcional")
+    conta_diff = pairs[~(pairs["DEBITO_IGUAL"] & pairs["CREDITO_IGUAL"])].copy()
+    if conta_diff.empty:
+        return pd.DataFrame(columns=base_cols)
 
-    if "sisbacen_resumo" not in st.session_state:
-        st.session_state["sisbacen_resumo"] = None
+    conta_diff = conta_diff[[
+        "DATA CONTAB", "VALOR CONTAB_R",
+        "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "HIST CONTAB",
+        "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA",
+        "DEBITO_IGUAL", "CREDITO_IGUAL"
+    ]].sort_values(["DATA CONTAB", "VALOR CONTAB_R", "ID CONTAB"]).reset_index(drop=True)
 
-    uploaded = st.file_uploader("Envie o relatório SISBACEN/SCR (PDF):", type=["pdf"], key="sisbacen_pdf")
+    return conta_diff
 
-    if uploaded is not None:
-        if st.button("Analisar relatório SISBACEN/SCR"):
-            try:
-                text = extract_pdf_text(uploaded)
-                resumo = analyze_sisbacen_text(text)
-                st.session_state["sisbacen_resumo"] = resumo
-                st.success("Relatório SISBACEN/SCR analisado com sucesso.")
-            except Exception as e:
-                st.error(f"Não foi possível ler o PDF do SISBACEN/SCR. Detalhe técnico: {e}")
+def export_excel_bytes(
+    base_contab: pd.DataFrame,
+    base_wba: pd.DataFrame,
+    resolved: Dict[str, List[MatchRow]],
+) -> bytes:
+    logging.info("Exportando Excel (BytesIO)...")
 
-    if st.session_state["sisbacen_resumo"]:
-        st.markdown("### Resumo da análise de crédito bancário (SISBACEN/SCR)")
-        st.write(st.session_state["sisbacen_resumo"])
+    title_map = [
+        ("exato", "Acertos_Exatos"),
+        ("mesmo_valor_data_perto", "Mesmo_Valor_Data_Perto"),
+        ("mesmo_dia_valor_parecido", "Mesmo_Dia_Valor_Parecido"),
+        ("valor_parecido_data_perto", "Valor_Parecido_Data_Perto"),
+        ("fuzzy", "Fuzzy_Valor+Data+Desc"),
+        ("so_contabilidade", "So_Contabilidade"),
+        ("so_wba", "So_WBA"),
+    ]
 
-    return st.session_state["sisbacen_resumo"]
+    dfs_dual: Dict[str, pd.DataFrame] = {}
+    for key, title in title_map:
+        dfs_dual[title] = to_dual_records(base_contab, base_wba, resolved.get(key, []))
 
-
-# =============== PARECER EM PROSA ===============
-
-def generate_report(
-    company_name,
-    all_answers,
-    category_scores,
-    overall_percent,
-    sazonalidade_resumo=None,
-    serasa_resumo=None,
-    sisbacen_resumo=None,
-):
-    wrapper = textwrap.TextWrapper(width=100)
-    lines = []
-
-    lines.append(f"Parecer de Crédito - Empresa: {company_name}")
-    lines.append("=" * 100)
-    lines.append(f"Data da análise: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    lines.append(f"Score geral de crédito: {overall_percent:.1f}%")
-    lines.append(f"Nível de risco: {risk_color(overall_percent)}")
-    lines.append("")
-
-    if sazonalidade_resumo:
-        lines.append("Resumo de sazonalidade de crédito:")
-        lines.append(wrapper.fill(sazonalidade_resumo))
-        lines.append("")
-
-    if serasa_resumo:
-        lines.append("Resumo da análise do relatório Serasa:")
-        lines.append(wrapper.fill(serasa_resumo))
-        lines.append("")
-
-    if sisbacen_resumo:
-        lines.append("Resumo da análise de crédito bancário (SISBACEN / SCR):")
-        lines.append(wrapper.fill(sisbacen_resumo))
-        lines.append("")
-
-    if overall_percent >= 80:
-        visao_geral = (
-            "Na minha avaliação, a empresa apresenta um perfil de crédito globalmente saudável. "
-            "Os fundamentos de capacidade de pagamento, organização e estrutura de suporte ao crédito "
-            "aparecem bem posicionados, permitindo uma exposição maior com risco relativamente controlado."
+    # DataValor_ContaDiff (com base nas SOBRAS)
+    try:
+        conta_diff_df = compute_data_valor_conta_divergente(
+            so_contab=dfs_dual.get("So_Contabilidade"),
+            so_wba=dfs_dual.get("So_WBA")
         )
-    elif overall_percent >= 60:
-        visao_geral = (
-            "Na minha leitura, a empresa demonstra um perfil de crédito razoável. Há pontos consistentes, "
-            "mas também algumas vulnerabilidades que sugerem prudência na definição de limites, prazos e "
-            "eventuais garantias. O crédito é possível, mas deve ser estruturado com critério."
-        )
-    elif overall_percent >= 40:
-        visao_geral = (
-            "Com base nas respostas fornecidas, o perfil de crédito da empresa apresenta fragilidades "
-            "significativas. A concessão de crédito deve ser feita com bastante cautela, em valores menores, "
-            "prazos mais curtos e forte amparo em garantias, até que os pontos críticos sejam endereçados."
-        )
-    else:
-        visao_geral = (
-            "Pela combinação das informações qualitativas e quantitativas, o perfil atual é de alto risco. "
-            "Há elementos que indicam baixa capacidade de suportar novas dívidas sem agravamento da situação "
-            "financeira. Minha opinião é que, neste momento, a empresa deveria priorizar reorganização interna "
-            "e ajuste de estrutura antes de novas concessões."
-        )
+    except Exception:
+        logging.exception("Falha ao calcular DataValor_ContaDiff; seguindo com aba vazia.")
+        conta_diff_df = pd.DataFrame(columns=[
+            "DATA CONTAB", "VALOR CONTAB_R", "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "HIST CONTAB",
+            "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA",
+            "DEBITO_IGUAL", "CREDITO_IGUAL"
+        ])
 
-    lines.append(wrapper.fill(visao_geral))
-    lines.append("")
-    lines.append("Resumo por dimensão (6 C’s do crédito):")
+    # Remove IDs migrados de So_Contabilidade / So_WBA
+    try:
+        if conta_diff_df is not None and not conta_diff_df.empty:
+            ids_sc = set(pd.to_numeric(conta_diff_df["ID CONTAB"], errors="coerce").dropna().astype(int))
+            ids_sw = set(pd.to_numeric(conta_diff_df["ID WBA"], errors="coerce").dropna().astype(int))
 
-    for cat, data in category_scores.items():
-        lines.append(f"- {cat}: {data['percent']:.1f}% ({risk_color(data['percent'])})")
+            if "So_Contabilidade" in dfs_dual:
+                sc_df = dfs_dual["So_Contabilidade"].copy()
+                if not sc_df.empty and "ID CONTAB" in sc_df.columns and ids_sc:
+                    idx_series = pd.to_numeric(sc_df["ID CONTAB"], errors="coerce")
+                    dfs_dual["So_Contabilidade"] = sc_df[~idx_series.isin(ids_sc)].reset_index(drop=True)
 
-    lines.append("")
-    lines.append("Análise qualitativa e opinião por C:")
+            if "So_WBA" in dfs_dual:
+                sw_df = dfs_dual["So_WBA"].copy()
+                if not sw_df.empty and "ID WBA" in sw_df.columns and ids_sw:
+                    idx_series = pd.to_numeric(sw_df["ID WBA"], errors="coerce")
+                    dfs_dual["So_WBA"] = sw_df[~idx_series.isin(ids_sw)].reset_index(drop=True)
 
-    for cat, questions in QUESTIONS.items():
-        lines.append("")
-        lines.append(f"--- {cat.upper()} ---")
+    except Exception:
+        logging.exception("Falha ao filtrar 'sobras' após DataValor_ContaDiff; mantendo originais.")
 
-        cat_percent = category_scores[cat]["percent"]
-        if cat_percent >= 80:
-            base_comment = f"Numérica e comparativamente, {cat} aparece como um ponto forte da empresa."
-        elif cat_percent >= 60:
-            base_comment = f"Em {cat}, os indicadores mostram um nível aceitável, porém com sinais que merecem acompanhamento."
-        elif cat_percent >= 40:
-            base_comment = f"Os resultados em {cat} revelam fragilidades relevantes, que podem se refletir em risco adicional na concessão de crédito."
-        else:
-            base_comment = f"Em {cat}, a pontuação indica um ponto crítico, que tende a pressionar negativamente a decisão de crédito."
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        # Bases
+        _write_sheet(writer, base_contab, "Base_Contabilidade", dual=False)
+        _write_sheet(writer, base_wba, "Base_WBA", dual=False)
 
-        lines.append(wrapper.fill(base_comment))
+        # Camadas
+        for _, title in title_map:
+            _write_sheet(writer, dfs_dual.get(title, pd.DataFrame()), title, dual=True)
 
-        cat_text_block = ""
-        for q in questions:
-            if q["type"] == "text":
-                ans = all_answers.get(q["id"], "")
-                if ans:
-                    cat_text_block += " " + ans
+        # Aba nova
+        if conta_diff_df is None:
+            conta_diff_df = pd.DataFrame(columns=[
+                "DATA CONTAB", "VALOR CONTAB_R",
+                "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "HIST CONTAB",
+                "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA",
+                "DEBITO_IGUAL", "CREDITO_IGUAL"
+            ])
+        conta_diff_df.to_excel(writer, index=False, sheet_name="DataValor_ContaDiff")
+        _format_simple_sheet(writer.book["DataValor_ContaDiff"])
 
-        comentario_qualitativo = analyze_text_block(cat_text_block, cat)
-        lines.append("")
-        lines.append(wrapper.fill(comentario_qualitativo))
+    buffer.seek(0)
+    return buffer.getvalue()
 
-        if cat == "Caráter":
-            recomendacao = (
-                "Recomendo reforçar o histórico de pontualidade, regularizar eventuais restrições e manter "
-                "uma postura transparente com credores e fornecedores, pois isso sustenta a confiança no longo prazo."
+
+# ============================ Streamlit UI ====================================
+
+with st.sidebar:
+    st.header("Parâmetros")
+    verbosity = st.selectbox("Log", options=["INFO", "DEBUG"], index=0)
+    janela_dias = st.number_input("Janela de dias (data perto)", min_value=0, value=7, step=1)
+    tol_valor = st.number_input("Tolerância de valor (R$)", min_value=0.0, value=1.00, step=0.10, format="%.2f")
+    limiar_desc = st.number_input("Limiar de similaridade (fuzzy)", min_value=0.0, max_value=1.0, value=0.62, step=0.01)
+
+setup_logging_streamlit(verbosity=1 if verbosity == "INFO" else 2)
+
+colA, colB = st.columns(2)
+with colA:
+    contab_file = st.file_uploader("📄 Contabilidade (Diário) - Excel", type=["xlsx", "xls"])
+with colB:
+    wba_file = st.file_uploader("📄 WBA - Excel", type=["xlsx", "xls"])
+
+st.divider()
+
+run = st.button("🚀 Gerar conciliação", type="primary", use_container_width=True)
+
+def _to_buffer(uploaded_file) -> BytesIO:
+    return BytesIO(uploaded_file.getvalue())
+
+if run:
+    if contab_file is None or wba_file is None:
+        st.error("Envie os dois arquivos (Contabilidade e WBA).")
+        st.stop()
+
+    with st.spinner("Processando conciliação..."):
+        try:
+            contab_buf = _to_buffer(contab_file)
+            wba_buf = _to_buffer(wba_file)
+
+            base_contab = read_contabilidade_to_standard(contab_buf)
+            base_wba = read_wba_to_standard(wba_buf)
+
+            tol_cents = int(round(float(tol_valor) * 100))
+            cand = build_candidates(
+                base_contab, base_wba,
+                janela_dias=int(janela_dias),
+                tol_valor_cents=tol_cents,
+                limiar_desc=float(limiar_desc),
             )
-        elif cat == "Capacidade":
-            recomendacao = (
-                "É importante aprimorar planejamento de fluxo de caixa, monitorar de perto endividamento e proteger "
-                "a margem operacional, garantindo que novas dívidas sejam suportáveis."
-            )
-        elif cat == "Capital":
-            recomendacao = (
-                "Fortalecer capital próprio, patrimônio e reservas aumenta a resiliência da empresa e reduz a "
-                "sensibilidade a choques de mercado ou perda de clientes."
-            )
-        elif cat == "Colateral":
-            recomendacao = (
-                "Estruturar garantias mais consistentes – seja em bens de boa liquidez, seja em recebíveis de qualidade – "
-                "melhora substancialmente a atratividade da empresa para operações de crédito."
-            )
-        elif cat == "Condições":
-            recomendacao = (
-                "Vale alinhar o uso do crédito ao momento setorial e macroeconômico, priorizando operações que apoiem "
-                "ajuste de estrutura ou crescimento sustentável, e não apenas o fechamento de buracos de curto prazo."
-            )
-        else:  # Conglomerado
-            recomendacao = (
-                "Aperfeiçoar governança, clareza nas relações entre empresas do grupo, qualidade da gestão e registros "
-                "contábeis ajuda a reduzir opacidade e transmitir mais segurança a quem concede crédito."
-            )
+            resolved = greedy_resolve(base_contab, base_wba, cand)
 
-        lines.append("")
-        lines.append("Recomendação nesta dimensão:")
-        lines.append(wrapper.fill(recomendacao))
-
-    return "\n".join(lines)
-
-
-# =============== WORD EM MEMÓRIA (PARA DOWNLOAD) ===============
-
-def generate_word_doc_bytes(company_name, report_text, overall_percent):
-    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', company_name) or "Empresa"
-    filename = f"Parecer_Credito_{safe_name}.docx"
-
-    doc = Document()
-    doc.add_heading("Parecer de Crédito Empresarial", level=1)
-    doc.add_paragraph(f"Empresa: {company_name}")
-    doc.add_paragraph(f"Score geral de crédito: {overall_percent:.1f}%")
-    doc.add_paragraph(f"Nível de risco: {risk_color(overall_percent)}")
-    doc.add_paragraph(f"Data da análise: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    doc.add_paragraph("")
-
-    doc.add_heading("Conclusão e opinião da IA", level=2)
-
-    for bloco in report_text.split("\n\n"):
-        bloco = bloco.strip()
-        if bloco:
-            doc.add_paragraph(bloco)
-
-    bio = BytesIO()
-    doc.save(bio)
-    bio.seek(0)
-    return filename, bio
-
-
-# =============== SAZONALIDADE (STREAMLIT) ===============
-
-def sazonalidade_section():
-    st.subheader("Sazonalidade de crédito")
-
-    possui_sazonalidade = st.radio(
-        "O negócio possui sazonalidade relevante ao longo do ano?",
-        ["Não", "Sim"],
-        horizontal=True
-    )
-
-    if possui_sazonalidade == "Não":
-        msg = "Não há sazonalidade específica nesse setor segundo as informações fornecidas."
-        st.info(msg)
-        return msg, None
-
-    setor = st.text_input(
-        "Informe o setor de atuação da empresa (ex.: fantasias, varejo, agro, serviços etc.):",
-        ""
-    ).lower()
-
-    pico_vendas = st.selectbox(
-        "Mês de pico de vendas/demanda:",
-        options=list(range(1, 13)),
-        format_func=lambda m: ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"][m - 1]
-    )
-
-    estrategia_default = 2
-    if any(p in setor for p in ["agro", "agrícola", "agronegócio", "soja", "safra", "grãos"]):
-        estrategia_default = 2  # durante
-
-    st.write("Em relação a esse pico de demanda, quando costuma ser mais adequado conceder crédito?")
-    estrategia = st.radio(
-        "Janela preferencial de crédito:",
-        [
-            "Alguns meses antes (preparação / formação de estoque)",
-            "Durante o próprio pico (ex.: agro no verão)",
-            "Logo depois do pico (pós-safra / pós-temporada)"
-        ],
-        index=estrategia_default - 1
-    )
-
-    if estrategia.startswith("Alguns meses antes"):
-        shift = -2
-    elif estrategia.startswith("Durante"):
-        shift = 0
-    else:
-        shift = 1
-
-    centro_credito = pico_vendas + shift
-    if centro_credito < 1:
-        centro_credito += 12
-    elif centro_credito > 12:
-        centro_credito -= 12
-
-    meses = list(range(1, 13))
-    nomes_meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
-                   "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
-
-    sigma = 2.0
-    valores_brutos = []
-    for m in meses:
-        dist_direta = abs(m - centro_credito)
-        dist_circular = min(dist_direta, 12 - dist_direta)
-        valor = math.exp(-(dist_circular ** 2) / (2 * sigma ** 2))
-        valores_brutos.append(valor)
-
-    max_valor = max(valores_brutos) if valores_brutos else 1
-    valores_percentuais = [(v / max_valor) * 100 for v in valores_brutos]
-
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(meses, valores_percentuais, marker="o")
-    ax.set_xticks(meses)
-    ax.set_xticklabels(nomes_meses)
-    ax.set_ylim(0, 110)
-    ax.set_xlabel("Meses do ano")
-    ax.set_ylabel("Atratividade de aprovação de crédito (%)")
-    ax.set_title("Sazonalidade recomendada de crédito")
-    ax.grid(True)
-
-    st.pyplot(fig)
-
-    if shift == -2:
-        janela = "alguns meses ANTES do pico de vendas"
-    elif shift == 0:
-        janela = "no próprio pico de vendas"
-    else:
-        janela = "logo DEPOIS do pico de vendas"
-
-    nome_mes_pico = nomes_meses[pico_vendas - 1]
-    nome_mes_centro = nomes_meses[centro_credito - 1]
-    resumo = (
-        f"Para o setor informado ({setor if setor else 'não especificado'}), a análise considera que o "
-        f"pico de demanda ocorre em {nome_mes_pico}. A janela ótima de crédito foi ajustada para {janela}, "
-        f"com maior atratividade concentrada em {nome_mes_centro} e meses próximos."
-    )
-
-    st.caption(resumo)
-    return resumo, fig
-
-
-# =============== APP STREAMLIT ===============
-
-def main():
-    st.set_page_config(page_title="IA de Crédito Empresarial - BRF", layout="wide")
-
-    st.title("IA de Diagnóstico de Crédito Empresarial")
-    st.write("Baseada nos 6 C’s do crédito – versão BR Financial com parecer opinativo, sazonalidade, Serasa e SISBACEN/SCR.")
-
-    company_name = st.text_input("Nome da empresa analisada:", "")
-
-    all_answers = {}
-    category_scores = {}
-
-    st.header("Questionário – 6 C’s do crédito")
-
-    for category, questions in QUESTIONS.items():
-        with st.expander(category, expanded=False):
-            cat_score = 0.0
-            cat_max = 0.0
-
-            for q in questions:
-                if q["type"] == "text":
-                    ans = st.text_area(q["text"], key=q["id"])
-                else:
-                    ans = st.slider(q["text"], 0.0, 10.0, 5.0, 0.5, key=q["id"])
-                    cat_score += ans
-                    cat_max += 10.0
-                all_answers[q["id"]] = ans
-
-            cat_percent = (cat_score / cat_max) * 100 if cat_max > 0 else 0
-            category_scores[category] = {
-                "score": cat_score,
-                "max": cat_max,
-                "percent": cat_percent
+            # Resumo
+            resumo = {
+                "exato": len(resolved.get("exato", [])),
+                "mesmo_valor_data_perto": len(resolved.get("mesmo_valor_data_perto", [])),
+                "mesmo_dia_valor_parecido": len(resolved.get("mesmo_dia_valor_parecido", [])),
+                "valor_parecido_data_perto": len(resolved.get("valor_parecido_data_perto", [])),
+                "fuzzy": len(resolved.get("fuzzy", [])),
+                "so_contabilidade": len(resolved.get("so_contabilidade", [])),
+                "so_wba": len(resolved.get("so_wba", [])),
             }
-            st.markdown(f"**Score parcial de {category}: {cat_percent:.1f}% ({risk_color(cat_percent)})**")
 
-    st.markdown("---")
-    sazonalidade_resumo, _ = sazonalidade_section()
+            st.success("Conciliação concluída!")
+            st.subheader("Resumo")
+            st.json(resumo)
 
-    st.markdown("---")
-    serasa_resumo = serasa_section()
+            xlsx_bytes = export_excel_bytes(base_contab, base_wba, resolved)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            st.download_button(
+                "⬇️ Baixar Excel (.xlsx)",
+                data=xlsx_bytes,
+                file_name=f"reconciliacao_WBA_vs_Contabilidade_{ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
-    st.markdown("---")
-    sisbacen_resumo = sisbacen_section()
+            # Prévia opcional
+            with st.expander("Prévia (primeiras linhas da Base_Contabilidade e Base_WBA)"):
+                st.write("Base_Contabilidade")
+                st.dataframe(base_contab.head(30), use_container_width=True)
+                st.write("Base_WBA")
+                st.dataframe(base_wba.head(30), use_container_width=True)
 
-    st.markdown("---")
-    if st.button("Gerar parecer e documento Word"):
-        company_name_use = company_name if company_name else "Empresa Não Informada"
-
-        total_score = sum(c["score"] for c in category_scores.values())
-        total_max = sum(c["max"] for c in category_scores.values())
-        overall_percent = (total_score / total_max) * 100 if total_max > 0 else 0
-
-        report = generate_report(
-            company_name_use,
-            all_answers,
-            category_scores,
-            overall_percent,
-            sazonalidade_resumo=sazonalidade_resumo,
-            serasa_resumo=serasa_resumo,
-            sisbacen_resumo=sisbacen_resumo,
-        )
-
-        st.subheader("Parecer de crédito")
-        st.text(report)
-
-        filename, word_bytes = generate_word_doc_bytes(company_name_use, report, overall_percent)
-
-        st.download_button(
-            label="Baixar parecer em Word",
-            data=word_bytes,
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-
-
-if __name__ == "__main__":
-    main()
+        except Exception as e:
+            st.exception(e)
