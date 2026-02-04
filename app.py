@@ -66,10 +66,31 @@ def to_float(x) -> float:
     except Exception:
         return np.nan
 
-def only_digits(x) -> str:
-    s = str(x) if x is not None else ""
-    return "".join(ch for ch in s if ch.isdigit())
 
+def only_digits(x) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return ""
+
+    # Se for número inteiro (int / numpy int)
+    if isinstance(x, (int, np.integer)):
+        return str(int(x))
+
+    # Se for float “inteiro” tipo 10018.0 -> vira 10018
+    if isinstance(x, (float, np.floating)):
+        if np.isfinite(x) and float(x).is_integer():
+            return str(int(x))
+
+    s = str(x).strip()
+    # remove casos tipo "10018.0", "10018,0"
+    s = s.replace(",", ".")
+    s = re.sub(r"\.0+$", "", s)
+
+    return re.sub(r"\D", "", s)
+
+def account_norm(x) -> Optional[str]:
+    d = only_digits(x)
+    return d if d != "" else None
+    
 def account_norm(x) -> Optional[str]:
     d = only_digits(x)
     return d if d != "" else None
