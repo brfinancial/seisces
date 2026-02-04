@@ -1,4 +1,4 @@
 streamlit
-python-docx
-matplotlib
-pdfplumber
+pandas
+numpy
+openpyxl
