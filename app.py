@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -24,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Conciliação WBA x Contabilidade (Diasdário)")
+st.title("Conciliação WBA x Contabilidade (Diário)")
 st.caption(
     "Faça upload dos arquivos da Contabilidade (layout Diário) e do WBA, ajuste os parâmetros e gere o Excel final."
 )
@@ -34,6 +32,9 @@ st.caption(
 def setup_logging_streamlit(verbosity: int = 1) -> None:
     level = logging.INFO if verbosity == 1 else logging.DEBUG
     fmt = "[%(asctime)s] %(levelname)s - %(message)s"
+    # evita duplicar handlers no rerun do Streamlit
+    for h in list(logging.root.handlers):
+        logging.root.removeHandler(h)
     logging.basicConfig(format=fmt, level=level, datefmt="%H:%M:%S")
 
 
@@ -66,31 +67,28 @@ def to_float(x) -> float:
     except Exception:
         return np.nan
 
-
 def only_digits(x) -> str:
+    """
+    Corrige o caso do Excel/pandas ler conta como float (ex.: 10018.0),
+    que antes virava "100180" ao remover caracteres não-numéricos.
+    """
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return ""
 
-    # Se for número inteiro (int / numpy int)
+    # inteiro nativo
     if isinstance(x, (int, np.integer)):
         return str(int(x))
 
-    # Se for float “inteiro” tipo 10018.0 -> vira 10018
+    # float "inteiro" tipo 10018.0
     if isinstance(x, (float, np.floating)):
         if np.isfinite(x) and float(x).is_integer():
             return str(int(x))
 
     s = str(x).strip()
-    # remove casos tipo "10018.0", "10018,0"
     s = s.replace(",", ".")
-    s = re.sub(r"\.0+$", "", s)
+    s = re.sub(r"\.0+$", "", s)     # remove .0, .00 etc
+    return re.sub(r"\D", "", s)     # mantém só dígitos
 
-    return re.sub(r"\D", "", s)
-
-def account_norm(x) -> Optional[str]:
-    d = only_digits(x)
-    return d if d != "" else None
-    
 def account_norm(x) -> Optional[str]:
     d = only_digits(x)
     return d if d != "" else None
@@ -189,7 +187,6 @@ def read_contabilidade_to_standard(path_or_buffer: Union[str, BytesIO]) -> pd.Da
             df = df.dropna(subset=["data", "conta_debito", "conta_credito", "valor"])
             df = df[df["valor"] > 0]
         else:
-            # Sem cabeçalho útil -> posicional
             df_raw = pd.read_excel(path_or_buffer, sheet_name=0, header=None, engine="openpyxl")
             df = _parse_diario_positional(df_raw)
     except Exception:
@@ -251,7 +248,6 @@ def read_wba_to_standard(path_or_buffer: Union[str, BytesIO]) -> pd.DataFrame:
 
     df = df_raw.rename(columns=colmap)[["conta_debito", "conta_credito", "valor", "data", "historico"]].copy()
 
-    # Segurança extra
     df["historico"] = _strip_leading_equals_in_series(df["historico"])
 
     for c in ["conta_debito", "conta_credito"]:
@@ -272,8 +268,8 @@ def read_wba_to_standard(path_or_buffer: Union[str, BytesIO]) -> pd.DataFrame:
 
 @dataclass(frozen=True)
 class MatchRow:
-    contab_idx: int
-    wba_idx: int
+    contab_idx: int   # (usaremos aqui o "contab_id" posicional)
+    wba_idx: int      # (usaremos aqui o "wba_id" posicional)
     tipo: str
     score: float
     diff_dias: int
@@ -292,35 +288,44 @@ def build_candidates(
     janela_dias: int,
     tol_valor_cents: int,
     limiar_desc: float,
-) -> Dict[str, List[MatchRow]]:
+) -> Tuple[Dict[str, List[MatchRow]], pd.DataFrame, pd.DataFrame]:
+    """
+    Retorna:
+      - cand: dict de listas MatchRow usando índices posicionais estáveis (contab_id/wba_id)
+      - contab_i: dataframe interno (com contab_id, valor_cents)
+      - wba_i: dataframe interno (com wba_id, valor_cents)
+    """
     logging.info("Gerando candidatos...")
-    contab = contab.copy().reset_index(drop=True)
-    wba = wba.copy().reset_index(drop=True)
-    
-    contab["valor_cents"] = contab["valor"].apply(cents)
-    wba["valor_cents"] = wba["valor"].apply(cents)
-    
-    # remove inválidos e RESETA índice posicional
-    contab = contab.dropna(subset=["valor_cents"]).reset_index(drop=True)
-    wba = wba.dropna(subset=["valor_cents"]).reset_index(drop=True)
-    
-    contab["valor_cents"] = contab["valor_cents"].astype(int)
-    wba["valor_cents"] = wba["valor_cents"].astype(int)
-    
-    # cria ids fixos para export (opcional, mas ótimo)
-    contab["contab_id"] = np.arange(len(contab))
-    wba["wba_id"] = np.arange(len(wba))
+
+    # Copia e garante índice posicional simples
+    contab_i = contab.copy().reset_index(drop=True)
+    wba_i = wba.copy().reset_index(drop=True)
+
+    # valor_cents robusto
+    contab_i["valor_cents"] = contab_i["valor"].apply(cents)
+    wba_i["valor_cents"] = wba_i["valor"].apply(cents)
+
+    # remove inválidos e reseta índice
+    contab_i = contab_i.dropna(subset=["valor_cents"]).reset_index(drop=True)
+    wba_i = wba_i.dropna(subset=["valor_cents"]).reset_index(drop=True)
+
+    contab_i["valor_cents"] = contab_i["valor_cents"].astype(int)
+    wba_i["valor_cents"] = wba_i["valor_cents"].astype(int)
+
+    # IDs estáveis (posicionais)
+    contab_i["contab_id"] = np.arange(len(contab_i))
+    wba_i["wba_id"] = np.arange(len(wba_i))
 
     def acct_key(a, b) -> Tuple[str, str]:
         return (a, b) if a <= b else (b, a)
 
+    # index exato
     idx_wba_exact: Dict[Tuple, List[int]] = {}
-    for row in wba.itertuples(index=False):
+    for row in wba_i.itertuples(index=False):
         key = (row.data, row.valor_cents, acct_key(row.conta_debito, row.conta_credito))
         idx_wba_exact.setdefault(key, []).append(int(row.wba_id))
 
-
-    cand = {
+    cand: Dict[str, List[MatchRow]] = {
         "exato": [],
         "mesmo_valor_data_perto": [],
         "mesmo_dia_valor_parecido": [],
@@ -328,35 +333,34 @@ def build_candidates(
         "fuzzy": [],
     }
 
-    # Para acesso rápido por índice
-    wba_by_idx = {int(r.wba_id): r for r in wba.itertuples(index=False)}
+    # acesso rápido wba por id
+    wba_by_id = {int(r.wba_id): r for r in wba_i.itertuples(index=False)}
 
     # 1) EXATO
-    for c in contab.itertuples(index=False):
+    for c in contab_i.itertuples(index=False):
         key = (c.data, c.valor_cents, acct_key(c.conta_debito, c.conta_credito))
         for wi in idx_wba_exact.get(key, []):
-            w = wba_by_idx.get(int(wi))
+            w = wba_by_id.get(int(wi))
             if w is None:
                 continue
             sd = similarity(c.historico, w.historico)
             cand["exato"].append(
-                MatchRow(int(c.contab_id), int(wi), "exato", score=3.0 + sd, diff_dias=0, diff_valor=0.0, sim_desc=sd)
+                MatchRow(int(c.contab_id), int(wi), "exato", score=3.0 + sd,
+                         diff_dias=0, diff_valor=0.0, sim_desc=sd)
             )
 
-            
-
     idx_wba_by_val: Dict[int, List[int]] = {}
-    for row in wba.itertuples(index=False):
-        idx_wba_by_val.setdefault(int(row.valor_cents), []).append(int(row.wba_idx))
+    for row in wba_i.itertuples(index=False):
+        idx_wba_by_val.setdefault(int(row.valor_cents), []).append(int(row.wba_id))
 
     idx_wba_by_date: Dict[object, List[int]] = {}
-    for row in wba.itertuples(index=False):
-        idx_wba_by_date.setdefault(row.data, []).append(int(row.wba_idx))
+    for row in wba_i.itertuples(index=False):
+        idx_wba_by_date.setdefault(row.data, []).append(int(row.wba_id))
 
     # 2) valor igual, data perto
-    for c in contab.itertuples(index=False):
+    for c in contab_i.itertuples(index=False):
         for wi in idx_wba_by_val.get(int(c.valor_cents), []):
-            w = wba_by_idx.get(int(wi))
+            w = wba_by_id.get(int(wi))
             if w is None:
                 continue
             if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
@@ -371,26 +375,25 @@ def build_candidates(
                 )
 
     # 3) mesma data, valor parecido
-    for c in contab.itertuples(index=False):
+    for c in contab_i.itertuples(index=False):
         for wi in idx_wba_by_date.get(c.data, []):
-            w = wba_by_idx.get(int(wi))
+            w = wba_by_id.get(int(wi))
             if w is None:
                 continue
             if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
                 continue
             dv_cents = abs(int(c.valor_cents) - int(w.valor_cents))
             if 0 < dv_cents <= tol_valor_cents:
-                dd = 0
                 dv = abs(float(c.valor) - float(w.valor))
                 sd = similarity(c.historico, w.historico)
                 score = (1.0 / (1 + dv)) + 1.5 + sd
                 cand["mesmo_dia_valor_parecido"].append(
-                    MatchRow(int(c.contab_id), int(wi), "mesmo_dia_valor_parecido", score, dd, dv, sd)
+                    MatchRow(int(c.contab_id), int(wi), "mesmo_dia_valor_parecido", score, 0, dv, sd)
                 )
 
-    # 4) valor parecido + data perto (atenção: O(n*m) — pode ser pesado em arquivos grandes)
-    wba_rows = list(wba.itertuples(index=False))
-    for c in contab.itertuples(index=False):
+    # 4) valor parecido + data perto (O(n*m))
+    wba_rows = list(wba_i.itertuples(index=False))
+    for c in contab_i.itertuples(index=False):
         for w in wba_rows:
             if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
                 continue
@@ -401,12 +404,12 @@ def build_candidates(
                     dv = abs(float(c.valor) - float(w.valor))
                     score = (1.0 / (1 + dd)) + (1.0 / (1 + dv))
                     cand["valor_parecido_data_perto"].append(
-                        MatchRow(int(c.contab_id), int(w.wba_idx), "valor_parecido_data_perto",
+                        MatchRow(int(c.contab_id), int(w.wba_id), "valor_parecido_data_perto",
                                  score, dd, dv, 0.0)
                     )
 
     # 5) fuzzy
-    for c in contab.itertuples(index=False):
+    for c in contab_i.itertuples(index=False):
         for w in wba_rows:
             if not _acct_set_equal(c.conta_debito, c.conta_credito, w.conta_debito, w.conta_credito):
                 continue
@@ -419,20 +422,23 @@ def build_candidates(
                         dv = abs(float(c.valor) - float(w.valor))
                         score = (1.0 / (1 + dd)) + (1.0 / (1 + dv)) + sd
                         cand["fuzzy"].append(
-                            MatchRow(int(c.contab_idx), int(w.wba_idx), "fuzzy",
+                            MatchRow(int(c.contab_id), int(w.wba_id), "fuzzy",
                                      score, dd, dv, sd)
                         )
 
     for k in cand:
         cand[k].sort(key=lambda r: r.score, reverse=True)
 
-    return cand
+    return cand, contab_i, wba_i
 
 def greedy_resolve(
-    contab: pd.DataFrame,
-    wba: pd.DataFrame,
+    contab_i: pd.DataFrame,
+    wba_i: pd.DataFrame,
     cand: Dict[str, List[MatchRow]],
 ) -> Dict[str, List[MatchRow]]:
+    """
+    Resolve 1-para-1 usando os índices posicionais (contab_id/wba_id).
+    """
     logging.info("Resolvendo conflitos (1-para-1)...")
     assigned_c = set()
     assigned_w = set()
@@ -447,8 +453,8 @@ def greedy_resolve(
                 assigned_c.add(m.contab_idx)
                 assigned_w.add(m.wba_idx)
 
-    all_c = set(range(len(contab)))
-    all_w = set(range(len(wba)))
+    all_c = set(range(len(contab_i)))
+    all_w = set(range(len(wba_i)))
 
     matched_c = set().union(*[set(x.contab_idx for x in result[t]) for t in result])
     matched_w = set().union(*[set(x.wba_idx for x in result[t]) for t in result])
@@ -478,7 +484,7 @@ def _format_dual_area_sheet(ws):
         cell.font = bold_font
         cell.alignment = center_v
 
-    for col_idx in range(7, 12+1):   # G..L (WBA)
+    for col_idx in range(7, 13):   # G..L (WBA)
         cell = ws.cell(row=1, column=col_idx)
         cell.fill = green_fill
         cell.font = bold_font
@@ -515,7 +521,6 @@ def _format_simple_sheet(ws):
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
 
-    # Autoajuste de coluna (limite de 60)
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
@@ -528,7 +533,6 @@ def _write_sheet(writer: pd.ExcelWriter, df: pd.DataFrame, name: str, dual: bool
     if df is None:
         df = pd.DataFrame()
 
-    # Se vier vazio sem colunas, ainda escreve um cabeçalho padrão
     if df.shape[1] == 0:
         df = pd.DataFrame(columns=[
             "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "DATA CONTAB", "VALOR CONTAB", "HIST CONTAB",
@@ -543,7 +547,7 @@ def _write_sheet(writer: pd.ExcelWriter, df: pd.DataFrame, name: str, dual: bool
         _format_simple_sheet(ws)
     return True
 
-def to_dual_records(contab: pd.DataFrame, wba: pd.DataFrame, matches: List[MatchRow]) -> pd.DataFrame:
+def to_dual_records(contab_i: pd.DataFrame, wba_i: pd.DataFrame, matches: List[MatchRow]) -> pd.DataFrame:
     cols = [
         "ID CONTAB", "CONTA DEB CONTAB", "CONTA CRED CONTAB", "DATA CONTAB", "VALOR CONTAB", "HIST CONTAB",
         "ID WBA", "CONTA DEB WBA", "CONTA CRED WBA", "DATA WBA", "VALOR WBA", "HIST WBA"
@@ -555,14 +559,13 @@ def to_dual_records(contab: pd.DataFrame, wba: pd.DataFrame, matches: List[Match
     for m in matches:
         c = None
         w = None
-        
-        if m.contab_idx is not None and m.contab_idx != -1:
-            if 0 <= m.contab_idx < len(contab):
-                c = contab.iloc[m.contab_idx]
-        
-        if m.wba_idx is not None and m.wba_idx != -1:
-            if 0 <= m.wba_idx < len(wba):
-                w = wba.iloc[m.wba_idx]
+
+        if m.contab_idx is not None and m.contab_idx != -1 and 0 <= m.contab_idx < len(contab_i):
+            c = contab_i.iloc[m.contab_idx]
+
+        if m.wba_idx is not None and m.wba_idx != -1 and 0 <= m.wba_idx < len(wba_i):
+            w = wba_i.iloc[m.wba_idx]
+
         rows.append({
             "ID CONTAB":         (int(m.contab_idx) if c is not None else None),
             "CONTA DEB CONTAB":  (c["conta_debito"] if c is not None else None),
@@ -626,9 +629,9 @@ def compute_data_valor_conta_divergente(so_contab: pd.DataFrame, so_wba: pd.Data
 
     unique_keys = (
         key_c.to_frame()
-        .join(key_w, how="inner")
-        .query("n_c == 1 and n_w == 1")
-        .index
+             .join(key_w, how="inner")
+             .query("n_c == 1 and n_w == 1")
+             .index
     )
     if len(unique_keys) == 0:
         return pd.DataFrame(columns=base_cols)
@@ -665,8 +668,8 @@ def compute_data_valor_conta_divergente(so_contab: pd.DataFrame, so_wba: pd.Data
     return conta_diff
 
 def export_excel_bytes(
-    base_contab: pd.DataFrame,
-    base_wba: pd.DataFrame,
+    contab_i: pd.DataFrame,
+    wba_i: pd.DataFrame,
     resolved: Dict[str, List[MatchRow]],
 ) -> bytes:
     logging.info("Exportando Excel (BytesIO)...")
@@ -683,7 +686,7 @@ def export_excel_bytes(
 
     dfs_dual: Dict[str, pd.DataFrame] = {}
     for key, title in title_map:
-        dfs_dual[title] = to_dual_records(base_contab, base_wba, resolved.get(key, []))
+        dfs_dual[title] = to_dual_records(contab_i, wba_i, resolved.get(key, []))
 
     # DataValor_ContaDiff (com base nas SOBRAS)
     try:
@@ -722,9 +725,9 @@ def export_excel_bytes(
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        # Bases
-        _write_sheet(writer, base_contab, "Base_Contabilidade", dual=False)
-        _write_sheet(writer, base_wba, "Base_WBA", dual=False)
+        # Bases (internas com id/valor_cents etc)
+        _write_sheet(writer, contab_i, "Base_Contabilidade", dual=False)
+        _write_sheet(writer, wba_i, "Base_WBA", dual=False)
 
         # Camadas
         for _, title in title_map:
@@ -783,15 +786,16 @@ if run:
             base_wba = read_wba_to_standard(wba_buf)
 
             tol_cents = int(round(float(tol_valor) * 100))
-            cand = build_candidates(
+
+            cand, contab_i, wba_i = build_candidates(
                 base_contab, base_wba,
                 janela_dias=int(janela_dias),
                 tol_valor_cents=tol_cents,
                 limiar_desc=float(limiar_desc),
             )
-            resolved = greedy_resolve(base_contab, base_wba, cand)
 
-            # Resumo
+            resolved = greedy_resolve(contab_i, wba_i, cand)
+
             resumo = {
                 "exato": len(resolved.get("exato", [])),
                 "mesmo_valor_data_perto": len(resolved.get("mesmo_valor_data_perto", [])),
@@ -806,8 +810,9 @@ if run:
             st.subheader("Resumo")
             st.json(resumo)
 
-            xlsx_bytes = export_excel_bytes(base_contab, base_wba, resolved)
+            xlsx_bytes = export_excel_bytes(contab_i, wba_i, resolved)
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
             st.download_button(
                 "⬇️ Baixar Excel (.xlsx)",
                 data=xlsx_bytes,
@@ -816,12 +821,11 @@ if run:
                 use_container_width=True,
             )
 
-            # Prévia opcional
             with st.expander("Prévia (primeiras linhas da Base_Contabilidade e Base_WBA)"):
                 st.write("Base_Contabilidade")
-                st.dataframe(base_contab.head(30), use_container_width=True)
+                st.dataframe(contab_i.head(30), use_container_width=True)
                 st.write("Base_WBA")
-                st.dataframe(base_wba.head(30), use_container_width=True)
+                st.dataframe(wba_i.head(30), use_container_width=True)
 
         except Exception as e:
             st.exception(e)
