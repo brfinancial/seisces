@@ -24,7 +24,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Conciliação WBA x Contabilidade (Diário)")
+st.title("Conciliação WBA x Contabilidade (Diasdário)")
 st.caption(
     "Faça upload dos arquivos da Contabilidade (layout Diário) e do WBA, ajuste os parâmetros e gere o Excel final."
 )
